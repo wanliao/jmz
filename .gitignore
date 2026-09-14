@@ -1,0 +1,14 @@
+node_modules/
+data/
+.env
+.env.local
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# 部署用打包产物（用 deploy/ 或 git 拉取，不需要入库）
+kimuzhi-bt-upload.zip
+*.tgz

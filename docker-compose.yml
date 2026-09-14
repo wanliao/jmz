@@ -1,0 +1,33 @@
+# Docker 部署方式（不想装 Node 的话用这个）
+# 启动：docker compose up -d --build
+# 查看日志：docker compose logs -f
+# 升级：git pull && docker compose up -d --build
+#
+# 显式指定项目名：目录名是中文时，compose 自动推导的项目名会是空的，导致报错
+
+name: kimuzhi
+
+services:
+  kimuzhi:
+    build: .
+    image: kimuzhi:latest
+    container_name: kimuzhi
+    restart: unless-stopped
+    ports:
+      # 只监听本机，由 Nginx 对外反代；想直接暴露改成 "8787:8787"
+      - '127.0.0.1:8787:8787'
+    environment:
+      TIME_ZONE: Asia/Shanghai
+      TZ: Asia/Shanghai
+      # 接口地址确定后改成 http，并挂载 config/endpoints.json
+      ADAPTER: http
+      DB_FILE: /data/kimuzhi.db
+      AUTO_REFRESH_MINUTES: '0'
+      SETTLE_GRACE_MS: '600000'
+      MOCK_SPEED: '1'
+      # 首次启动的管理员（也可以在后台改密码）
+      ADMIN_USERNAME: admin
+      ADMIN_PASSWORD: admin123
+    volumes:
+      - ./data:/data
+      - ./config:/app/config:ro

@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0e1014" />
+    <meta name="description" content="和平精英每周点赞统计工具：一眼看到每个账号本周已经刷了多少点赞，距离 350 上限还差多少。" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <title>金拇指 · 和平精英每周点赞统计</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>👍</text></svg>"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <button id="accountBtn" class="profile" type="button" title="账号设置">
+          <span class="account-avatar" id="accountAvatar" aria-hidden="true">游</span>
+          <span class="profile-text">
+            <span class="account-name" id="accountName">游客</span>
+            <span class="account-sub" id="accountSub">本地模式</span>
+          </span>
+        </button>
+        <span class="brand-title">金拇指</span>
+        <div class="topbar-actions">
+          <button id="themeToggle" class="icon-btn" type="button" aria-label="切换深色 / 浅色模式">
+            <span class="icon-sun" aria-hidden="true">☀️</span>
+            <span class="icon-moon" aria-hidden="true">🌙</span>
+          </button>
+          <button id="refreshAllBtn" class="icon-btn" type="button" aria-label="刷新全部" title="刷新全部">
+            <svg class="icon-refresh" viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M20 11a8 8 0 1 0-2.3 6.1"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2.1"
+                stroke-linecap="round"
+              />
+              <path
+                d="M20 4.6V11h-6.4"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2.1"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </button>
+          <button id="addBtn" class="icon-btn icon-btn-accent" type="button" aria-label="添加账号" title="添加账号">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M12 5v14M5 12h14"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2.4"
+                stroke-linecap="round"
+              />
+            </svg>
+          </button>
+        </div>
+      </header>
+
+      <div class="notice notice-guest" id="guestNotice" hidden>
+        <span>
+          <strong>未登录（本地模式）</strong>：你添加的游戏账号只保存在<strong>这台浏览器</strong>里，
+          不会上传、后台也看不到，换设备或清缓存就没了。想云端保存并跨设备同步，点左上角头像<strong>注册</strong>。
+        </span>
+        <button class="btn btn-sm btn-primary" type="button" data-open-account>注册 / 登录</button>
+      </div>
+
+      <div class="notice" id="adapterNotice" hidden></div>
+      <div class="notice notice-error" id="errorNotice" hidden></div>
+
+      <main>
+        <div class="cards" id="accountList"></div>
+
+        <section class="empty" id="emptyState" hidden>
+          <span class="empty-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24">
+              <path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+            </svg>
+          </span>
+          <h2>还没有添加账号</h2>
+          <p>添加一个游戏账号，就能看到本周已经刷了多少点赞。</p>
+          <button class="btn btn-lg btn-neutral" type="button" data-open-add>添加第一个账号</button>
+          <p class="empty-note">第一次要手填一个上周点赞数作为基准，之后每周由服务器自动结算。</p>
+        </section>
+      </main>
+
+      <!-- 公告卡：内容由管理员在后台改（留空则整张卡片不显示） -->
+      <section class="announce" id="announceCard" hidden>
+        <h2 class="announce-title">公告</h2>
+        <p class="announce-text" id="announceText"></p>
+      </section>
+
+      <footer class="footer">
+        <p class="footer-line">
+          <span>距离本周重置（周一 00:00:01）</span>
+          <strong class="footer-countdown" id="footerCountdown">--</strong>
+        </p>
+      </footer>
+    </div>
+
+    <!-- 添加账号 -->
+    <dialog id="addDialog" class="sheet">
+      <form id="addForm" method="dialog" novalidate>
+        <header class="sheet-head">
+          <h2>添加账号</h2>
+          <button class="icon-btn" type="button" data-close-dialog aria-label="关闭">✕</button>
+        </header>
+
+        <div class="field">
+          <label for="nicknameInput">游戏昵称</label>
+          <input
+            id="nicknameInput"
+            name="nickname"
+            type="text"
+            autocomplete="off"
+            placeholder="请输入游戏内昵称"
+            required
+          />
+          <p class="hint">要和游戏里完全一致，包括符号和空格。</p>
+        </div>
+
+        <div class="field">
+          <span class="label">大区</span>
+          <div class="segmented" id="regionSegmented" role="radiogroup" aria-label="大区"></div>
+          <p class="hint">微信区和 QQ 区是两套数据，同一个昵称在两边是不同的角色。</p>
+        </div>
+
+        <div class="field">
+          <label for="baselineInput">上周点赞数</label>
+          <input
+            id="baselineInput"
+            name="lastWeekLikes"
+            type="number"
+            inputmode="numeric"
+            min="0"
+            step="1"
+            placeholder="例如 1234"
+            required
+          />
+          <p class="hint">
+            仅第一次需要手填：打开游戏主页 →「游戏数据」里的点赞值，填<strong>上个周一 05:00 时的那个数</strong>。之后每周由服务器自动结算，不用再填。<br />
+            不知道上周是多少？<strong>填当前总点赞值也行</strong> —— 本周就从 0 开始算，下周一服务器会自动结算出真实基线。
+          </p>
+        </div>
+
+        <div class="form-error" id="addFormError" hidden></div>
+
+        <footer class="sheet-foot">
+          <button class="btn btn-ghost" type="button" data-close-dialog>取消</button>
+          <button class="btn btn-primary" type="submit" id="addSubmitBtn">添加并查询</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <!-- 改上周点赞数 -->
+    <dialog id="baselineDialog" class="sheet">
+      <form id="baselineForm" method="dialog" novalidate>
+        <header class="sheet-head">
+          <h2>改上周点赞数</h2>
+          <button class="icon-btn" type="button" data-close-dialog aria-label="关闭">✕</button>
+        </header>
+
+        <p class="sheet-desc" id="baselineDesc"></p>
+
+        <div class="field">
+          <label for="baselineEditInput">上周点赞</label>
+          <input id="baselineEditInput" type="number" inputmode="numeric" min="0" step="1" required />
+          <p class="hint">
+            本周已刷 = 当前总点赞 − 这个数。如果出现「当前总点赞比上周还少」的异常，通常是把上周点赞填高了，改小即可。
+          </p>
+        </div>
+
+        <div class="form-error" id="baselineFormError" hidden></div>
+
+        <footer class="sheet-foot">
+          <button class="btn btn-ghost" type="button" data-close-dialog>取消</button>
+          <button class="btn btn-primary" type="submit" id="baselineSubmitBtn">保存</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <!-- 账号：注册 / 登录 / 账号信息 -->
+    <dialog id="accountDialog" class="sheet">
+      <div class="sheet-body">
+        <header class="sheet-head">
+          <h2 id="accountDialogTitle">注册 / 登录</h2>
+          <button class="icon-btn" type="button" data-close-dialog aria-label="关闭">✕</button>
+        </header>
+
+        <!-- 已登录（含游客）时的账号卡片 -->
+        <div id="accountInfo" hidden>
+          <div class="account-card">
+            <span class="account-avatar account-avatar-lg" id="accountInfoAvatar" aria-hidden="true">游</span>
+            <div>
+              <strong id="accountInfoName">游客</strong>
+              <p class="hint" id="accountInfoDesc"></p>
+            </div>
+          </div>
+          <p class="hint" id="accountSyncHint"></p>
+          <div class="sheet-foot sheet-foot-stack">
+            <!-- 管理员入口只在这里出现（顶栏不放），没有权限时保持 hidden -->
+            <a id="adminEntry" class="btn btn-ghost btn-block" href="/admin.html" hidden>管理后台</a>
+            <button class="btn btn-ghost btn-block" type="button" id="changePasswordBtn" hidden>修改密码</button>
+            <button class="btn btn-ghost btn-block" type="button" id="logoutBtn" hidden>退出登录</button>
+          </div>
+        </div>
+
+        <!-- 注册 / 登录表单 -->
+        <div id="authForms">
+          <div class="tabs tabs-inline">
+            <button class="tab is-active" type="button" data-auth-tab="register">注册</button>
+            <button class="tab" type="button" data-auth-tab="login">登录</button>
+          </div>
+
+          <form id="registerForm" novalidate>
+            <p class="hint" id="registerHint">
+              注册后现在这些游戏账号会一起保留（同一个身份原地升级），换设备登录就能看到。
+            </p>
+            <div class="field">
+              <label for="registerUsername">账号</label>
+              <input id="registerUsername" type="text" autocomplete="username" placeholder="例如 wozai" />
+            </div>
+            <div class="field">
+              <label for="registerPassword">密码</label>
+              <input id="registerPassword" type="password" autocomplete="new-password" placeholder="自己不忘记就行" />
+            </div>
+            <div class="form-error" id="registerError" hidden></div>
+            <button class="btn btn-primary btn-block" type="submit" id="registerSubmit">注册并继续</button>
+          </form>
+
+          <form id="loginForm" novalidate hidden>
+            <p class="hint">用之前注册的账号登录，游戏账号会从云端同步下来。</p>
+            <div class="field">
+              <label for="loginUsername">账号</label>
+              <input id="loginUsername" type="text" autocomplete="username" />
+            </div>
+            <div class="field">
+              <label for="loginPassword">密码</label>
+              <input id="loginPassword" type="password" autocomplete="current-password" />
+            </div>
+            <div class="form-error" id="loginError" hidden></div>
+            <button class="btn btn-primary btn-block" type="submit" id="loginSubmit">登录</button>
+          </form>
+        </div>
+
+        <!-- 修改密码 -->
+        <form id="passwordForm" novalidate hidden>
+          <div class="field">
+            <label for="oldPassword">原密码</label>
+            <input id="oldPassword" type="password" autocomplete="current-password" />
+          </div>
+          <div class="field">
+            <label for="newPassword">新密码</label>
+            <input id="newPassword" type="password" autocomplete="new-password" />
+          </div>
+          <div class="form-error" id="passwordError" hidden></div>
+          <footer class="sheet-foot">
+            <button class="btn btn-ghost" type="button" id="cancelPasswordBtn">返回</button>
+            <button class="btn btn-primary" type="submit" id="passwordSubmit">保存</button>
+          </footer>
+        </form>
+      </div>
+    </dialog>
+
+    <div class="toasts" id="toasts" aria-live="polite"></div>
+
+    <script type="module" src="/js/app.js"></script>
+  </body>
+</html>

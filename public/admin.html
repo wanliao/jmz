@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b0f1a" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>管理后台 · 金拇指</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛠️</text></svg>"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/admin.css" />
+  </head>
+  <body>
+    <div class="app admin-app">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-logo" aria-hidden="true">🛠️</span>
+          <div class="brand-text">
+            <h1>管理后台</h1>
+            <p>金拇指 · 用户 / 游戏账号</p>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <button id="themeToggle" class="icon-btn" type="button" aria-label="切换深色 / 浅色模式">
+            <span class="icon-sun" aria-hidden="true">☀️</span>
+            <span class="icon-moon" aria-hidden="true">🌙</span>
+          </button>
+          <a class="btn btn-ghost" href="/">← 回到统计页</a>
+          <button id="logoutBtn" class="btn btn-ghost" type="button">退出登录</button>
+        </div>
+      </header>
+
+      <!-- 未登录 / 非管理员时显示 -->
+      <section class="admin-gate" id="gate" hidden>
+        <h2 id="gateTitle">需要管理员身份</h2>
+        <p id="gateText">请用管理员账号登录。</p>
+        <form id="loginForm" class="gate-form">
+          <div class="field">
+            <label for="loginUsername">管理员账号</label>
+            <input id="loginUsername" type="text" autocomplete="username" placeholder="admin" />
+          </div>
+          <div class="field">
+            <label for="loginPassword">密码</label>
+            <input id="loginPassword" type="password" autocomplete="current-password" placeholder="密码" />
+          </div>
+          <div class="form-error" id="loginError" hidden></div>
+          <button class="btn btn-primary btn-block" type="submit" id="loginSubmit">登录</button>
+        </form>
+      </section>
+
+      <!-- 管理员内容 -->
+      <div id="panel" hidden>
+        <div class="notice notice-error" id="defaultPasswordNotice" hidden>
+          <strong>你还在用默认管理员密码（admin123）。</strong>请立刻在下面「修改我的密码」里改掉。
+        </div>
+        <div class="notice" id="errorNotice" hidden></div>
+
+        <div class="notice notice-actions">
+          <span>
+            定时任务会在<strong>每周一 00:00:01</strong>自动按 roleId 结算上一周点赞。
+            如果那天服务器正好停机，可以在下面手动补一次。
+          </span>
+          <button class="btn btn-sm btn-ghost" id="runSettleBtn" type="button">手动结算一次</button>
+        </div>
+
+        <section class="summary" aria-label="总览">
+          <div class="summary-item"><span class="summary-label">注册用户</span><strong class="summary-value" id="statUsers">0</strong></div>
+          <div class="summary-item"><span class="summary-label">游戏账号</span><strong class="summary-value" id="statRoles">0</strong></div>
+          <div class="summary-item summary-item-wide"><span class="summary-label">当前游戏周 / 上次结算</span><strong class="summary-value" id="statWeek">--</strong></div>
+        </section>
+
+        <nav class="tabs" role="tablist">
+          <button class="tab is-active" data-tab="users" role="tab">用户</button>
+          <button class="tab" data-tab="roles" role="tab">游戏账号</button>
+          <button class="tab" data-tab="announce" role="tab">公告</button>
+          <button class="tab" data-tab="logs" role="tab">操作日志</button>
+          <button class="tab" data-tab="me" role="tab">修改我的密码</button>
+        </nav>
+
+        <!-- 用户 -->
+        <section class="panel-block" data-panel="users">
+          <div class="toolbar">
+            <input id="userFilter" class="toolbar-input" type="search" placeholder="搜索账号名 / 用户 ID" />
+            <button class="btn btn-ghost btn-sm" id="reloadUsers" type="button">刷新</button>
+          </div>
+          <div class="table-wrap">
+            <table class="table" id="userTable">
+              <thead>
+                <tr>
+                  <th>ID</th><th>账号</th><th>身份</th><th>游戏账号</th><th>本周已刷合计</th><th>会话</th><th>注册时间</th><th>操作</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- 游戏账号 -->
+        <section class="panel-block" data-panel="roles" hidden>
+          <div class="toolbar">
+            <input id="roleFilter" class="toolbar-input" type="search" placeholder="搜索 roleId / 名字 / 归属账号" />
+            <button class="btn btn-ghost btn-sm" id="reloadRoles" type="button">刷新</button>
+          </div>
+          <div class="table-wrap">
+            <table class="table" id="roleTable">
+              <thead>
+                <tr>
+                  <th>roleId</th><th>名字</th><th>大区</th><th>归属账号</th><th>上周点赞(基线)</th><th>当前总点赞</th><th>本周已刷</th><th>操作</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- 公告（首页底部那张卡片） -->
+        <section class="panel-block" data-panel="announce" hidden>
+          <form id="announceForm" class="narrow-form">
+            <div class="field">
+              <label for="announceInput">首页公告</label>
+              <textarea
+                id="announceInput"
+                rows="5"
+                maxlength="500"
+                placeholder="写点要告诉大家的事，例如：本周结算时间调整 / 新版本说明。留空则不显示公告卡片。"
+              ></textarea>
+              <p class="hint">
+                这段文字会显示在统计页最下面的一张「公告」卡片里。<strong>留空 = 不显示这张卡片</strong>；换行会原样保留。
+              </p>
+            </div>
+            <div class="form-error" id="announceError" hidden></div>
+            <button class="btn btn-primary" type="submit" id="announceSubmit">保存公告</button>
+          </form>
+        </section>
+
+        <!-- 日志 -->
+        <section class="panel-block" data-panel="logs" hidden>
+          <div class="toolbar">
+            <button class="btn btn-ghost btn-sm" id="reloadLogs" type="button">刷新</button>
+          </div>
+          <div class="table-wrap">
+            <table class="table" id="logTable">
+              <thead>
+                <tr><th>时间</th><th>操作者</th><th>动作</th><th>对象</th><th>详情</th></tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- 改密码 -->
+        <section class="panel-block" data-panel="me" hidden>
+          <form id="passwordForm" class="narrow-form">
+            <div class="field">
+              <label for="oldPassword">原密码</label>
+              <input id="oldPassword" type="password" autocomplete="current-password" />
+            </div>
+            <div class="field">
+              <label for="newPassword">新密码</label>
+              <input id="newPassword" type="password" autocomplete="new-password" />
+            </div>
+            <div class="form-error" id="passwordError" hidden></div>
+            <button class="btn btn-primary" type="submit" id="passwordSubmit">保存新密码</button>
+          </form>
+        </section>
+      </div>
+    </div>
+
+    <!-- 通用编辑弹窗 -->
+    <dialog id="editDialog" class="sheet">
+      <form id="editForm" method="dialog" novalidate>
+        <header class="sheet-head">
+          <h2 id="editTitle">编辑</h2>
+          <button class="icon-btn" type="button" data-close-dialog aria-label="关闭">✕</button>
+        </header>
+        <div id="editFields" class="edit-fields"></div>
+        <div class="form-error" id="editError" hidden></div>
+        <footer class="sheet-foot">
+          <button class="btn btn-ghost" type="button" data-close-dialog>取消</button>
+          <button class="btn btn-primary" type="submit" id="editSubmit">保存</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <div class="toasts" id="toasts" aria-live="polite"></div>
+    <script type="module" src="/js/admin.js"></script>
+  </body>
+</html>

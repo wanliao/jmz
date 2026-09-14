@@ -1,0 +1,21 @@
+{
+  "name": "hpjy-weekly-likes",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "和平精英每周点赞统计工具（网页版）：零依赖 Node 服务端 + 移动端优先前端",
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server/index.js",
+    "dev": "node --disable-warning=ExperimentalWarning --watch server/index.js",
+    "test": "node --test",
+    "smoke": "node scripts/smoke.mjs",
+    "ui:check": "node scripts/ui-check.mjs",
+    "seed:demo": "node scripts/seed-demo.mjs",
+    "seed:clean": "node scripts/seed-demo.mjs --clean",
+    "admin": "node --disable-warning=ExperimentalWarning scripts/create-admin.mjs",
+    "check": "node --check server/index.js && node --check server/api.js && node --check public/js/app.js && node --check public/js/admin.js"
+  }
+}

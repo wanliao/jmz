@@ -1,0 +1,75 @@
+{
+  "$comment": [
+    "真实接口配置模板。当前填的就是「和平营地 roleId 查询 API」的真实配置，可直接用：",
+    "  cp config/endpoints.example.json config/endpoints.json",
+    "然后在 .env 里把 ADAPTER 改成 http（默认已经是 http）。",
+    "",
+    "要点（照抄接口文档的实测结论，改配置前先看一眼）：",
+    "  1. zone：1 = QQ区，2 = 微信区（不是反的）；",
+    "  2. HTTP 状态码恒为 200，成败只看 body 里的 code 字段，所以 successPath/successValue 必须配；",
+    "  3. likeTimes 是字符串、可能是 null（null 和 0 含义不同，不能直接 Number()）；",
+    "  4. 接口A 会走搜索、接口B 只打荣耀接口，所以添加账号用 A、日常刷新用 B；",
+    "  5. 不做主动限速、不管额度 —— 接口若提示「请求过于频繁」会自动退避重试（retryOnRateLimit）；",
+    "  6. roleId 最大 42 亿，全程按字符串处理，不要转成数字。",
+    "",
+    "环境变量会覆盖这里的同名字段：ADAPTER / API_BASE_URL / API_KEY / API_A_ROLEID_PATH / API_B_LIKES_PATH 等。"
+  ],
+  "adapter": "http",
+  "timeZone": "Asia/Shanghai",
+  "mock": {
+    "speed": 1,
+    "epochKey": "2024-01-01"
+  },
+
+  "apiKey": "",
+  "apiKeyParam": "key",
+  "apiKeyHeader": "",
+
+  "apiA": {
+    "url": "https://hp.likeun.com/",
+    "method": "GET",
+    "headers": { "Accept": "application/json" },
+    "query": {
+      "id": "{nickname}",
+      "zone": "{regionCode}"
+    },
+    "body": {},
+    "roleIdPath": "roleId",
+    "likesPath": "likeTimes",
+    "successPath": "code",
+    "successValue": 200,
+    "errorCodePath": "error",
+    "errorMessagePath": "message",
+    "regionCodes": {
+      "qq": "1",
+      "wechat": "2"
+    },
+    "profile": {
+      "campNickname": "nickname",
+      "roleName": "roleName",
+      "uinType": "uinType",
+      "highestDivName": "highestDivName",
+      "location": "locationName",
+      "city": "city"
+    },
+    "retryOnRateLimit": 3,
+    "timeoutMs": 20000
+  },
+
+  "apiB": {
+    "url": "https://hp.likeun.com/",
+    "method": "GET",
+    "headers": { "Accept": "application/json" },
+    "query": {
+      "roleId": "{roleId}"
+    },
+    "body": {},
+    "likesPath": "likeTimes",
+    "successPath": "code",
+    "successValue": 200,
+    "errorCodePath": "error",
+    "errorMessagePath": "message",
+    "retryOnRateLimit": 3,
+    "timeoutMs": 15000
+  }
+}

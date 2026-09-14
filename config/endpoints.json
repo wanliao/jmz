@@ -1,0 +1,65 @@
+{
+  "adapter": "http",
+  "timeZone": "Asia/Shanghai",
+  "mock": {
+    "speed": 1,
+    "epochKey": "2024-01-01"
+  },
+  "comment_key": "如果接口服务在管理界面设了「访问密钥」，把密钥填到 apiKey（或写进 .env 的 API_KEY，环境变量优先）。留空表示不需要密钥。",
+  "apiKey": "",
+  "apiKeyParam": "key",
+  "apiKeyHeader": "",
+
+  "apiA": {
+    "comment": "接口A：昵称 + 大区 -> 隐藏 roleId（同时带回点赞数与账号档案）。添加账号时走这个。",
+    "url": "https://hp.likeun.com/",
+    "method": "GET",
+    "headers": { "Accept": "application/json" },
+    "query": {
+      "id": "{nickname}",
+      "zone": "{regionCode}"
+    },
+    "body": {},
+    "roleIdPath": "roleId",
+    "likesPath": "likeTimes",
+    "successPath": "code",
+    "successValue": 200,
+    "errorCodePath": "error",
+    "errorMessagePath": "message",
+    "regionCodes": {
+      "qq": "1",
+      "wechat": "2"
+    },
+    "comment_profile": "抓「不会过期」的档案字段 + 头像。头像只在添加账号时抓一次（之后不再变，不用重复抓）；当前段位/王牌印记/K-D/注册时间会变，抓了会误导人，所以不抓也不显示。",
+    "profile": {
+      "avatar": "avatar",
+      "campNickname": "nickname",
+      "roleName": "roleName",
+      "uinType": "uinType",
+      "highestDivName": "highestDivName",
+      "location": "locationName",
+      "city": "city"
+    },
+    "comment_retry": "不做主动限速；接口提示「请求过于频繁」时自动退避重试这么多次",
+    "retryOnRateLimit": 3,
+    "timeoutMs": 20000
+  },
+
+  "apiB": {
+    "comment": "接口B：roleId -> 当前总点赞数。只打荣耀接口，比接口A 轻，刷新走这个。",
+    "url": "https://hp.likeun.com/",
+    "method": "GET",
+    "headers": { "Accept": "application/json" },
+    "query": {
+      "roleId": "{roleId}"
+    },
+    "body": {},
+    "likesPath": "likeTimes",
+    "successPath": "code",
+    "successValue": 200,
+    "errorCodePath": "error",
+    "errorMessagePath": "message",
+    "retryOnRateLimit": 3,
+    "timeoutMs": 15000
+  }
+}

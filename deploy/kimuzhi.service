@@ -1,0 +1,31 @@
+[Unit]
+Description=Kimuzhi - 和平精英每周点赞统计工具
+Documentation=https://github.com/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 用 env 查 PATH，避免不同发行版 node 路径不一致
+# --disable-warning：node:sqlite 目前会打一条 experimental 警告，这里静音保持日志干净
+ExecStart=/usr/bin/env node --disable-warning=ExperimentalWarning server/index.js
+WorkingDirectory=/opt/kimuzhi
+EnvironmentFile=-/opt/kimuzhi/.env
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=kimuzhi
+
+# 安全加固：只允许写 data 目录（SQLite 库文件在这里）
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ReadWritePaths=/opt/kimuzhi/data
+
+[Install]
+WantedBy=multi-user.target
