@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#0e1014" />
     <meta name="description" content="和平精英每周点赞统计工具：一眼看到每个账号本周已经刷了多少点赞，距离 350 上限还差多少。" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <title>金拇指 · 和平精英每周点赞统计</title>
+    <title>金拇指小工具</title>
     <link
       rel="icon"
       href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>👍</text></svg>"
@@ -64,10 +64,9 @@
 
       <div class="notice notice-guest" id="guestNotice" hidden>
         <span>
-          <strong>未登录（本地模式）</strong>：你添加的游戏账号只保存在<strong>这台浏览器</strong>里，
-          不会上传、后台也看不到，换设备或清缓存就没了。想云端保存并跨设备同步，点左上角头像<strong>注册</strong>。
+          <strong>未登录</strong>：你添加的游戏账号只保存在本地，未云端保存并跨设备同步，请<strong>注册</srong>账号
         </span>
-        <button class="btn btn-sm btn-primary" type="button" data-open-account>注册 / 登录</button>
+       
       </div>
 
       <div class="notice" id="adapterNotice" hidden></div>
@@ -82,10 +81,9 @@
               <path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
             </svg>
           </span>
-          <h2>还没有添加账号</h2>
-          <p>添加一个游戏账号，就能看到本周已经刷了多少点赞。</p>
-          <button class="btn btn-lg btn-neutral" type="button" data-open-add>添加第一个账号</button>
-          <p class="empty-note">第一次要手填一个上周点赞数作为基准，之后每周由服务器自动结算。</p>
+          <h2>暂无账号</h2>
+          <button class="btn btn-lg btn-neutral" type="button" data-open-add>点击添加账号</button>
+          <p class="empty-note">首次添加账号需要手填写上周点赞数作为基准，之后每周由服务器自动结算。</p>
         </section>
       </main>
 
@@ -97,7 +95,7 @@
 
       <footer class="footer">
         <p class="footer-line">
-          <span>距离本周重置（周一 00:00:01）</span>
+          <span>自动重置（周一 00:00:01）</span>
           <strong class="footer-countdown" id="footerCountdown">--</strong>
         </p>
       </footer>
@@ -121,13 +119,13 @@
             placeholder="请输入游戏内昵称"
             required
           />
-          <p class="hint">要和游戏里完全一致，包括符号和空格。</p>
+          <p class="hint">要和游戏里完全一致，包括符号和空格，不是数字id，比如：晴天</p>
         </div>
 
         <div class="field">
           <span class="label">大区</span>
           <div class="segmented" id="regionSegmented" role="radiogroup" aria-label="大区"></div>
-          <p class="hint">微信区和 QQ 区是两套数据，同一个昵称在两边是不同的角色。</p>
+     
         </div>
 
         <div class="field">
@@ -143,7 +141,7 @@
             required
           />
           <p class="hint">
-            仅第一次需要手填：打开游戏主页 →「游戏数据」里的点赞值，填<strong>上个周一 05:00 时的那个数</strong>。之后每周由服务器自动结算，不用再填。<br />
+            仅第一次需要手填：打开游戏主页 →「游戏数据」里的点赞值，填<strong>上个周一 00:00 时的那个数</strong>。之后每周由服务器自动结算，不用再填。<br />
             不知道上周是多少？<strong>填当前总点赞值也行</strong> —— 本周就从 0 开始算，下周一服务器会自动结算出真实基线。
           </p>
         </div>
@@ -223,11 +221,11 @@
             </p>
             <div class="field">
               <label for="registerUsername">账号</label>
-              <input id="registerUsername" type="text" autocomplete="username" placeholder="例如 wozai" />
+              <input id="registerUsername" type="text" autocomplete="username" placeholder="英文/数字" />
             </div>
             <div class="field">
               <label for="registerPassword">密码</label>
-              <input id="registerPassword" type="password" autocomplete="new-password" placeholder="自己不忘记就行" />
+              <input id="registerPassword" type="password" autocomplete="new-password" placeholder="英文/数字" />
             </div>
             <div class="form-error" id="registerError" hidden></div>
             <button class="btn btn-primary btn-block" type="submit" id="registerSubmit">注册并继续</button>
