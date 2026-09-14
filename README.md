@@ -317,14 +317,81 @@ bash deploy/deploy.sh root@你的服务器IP --domain 你的域名或IP --nginx
 **以后每次更新代码，重复执行同一条命令即可**：只替换代码，`data/kimuzhi.db` 和 `.env` 会保留，
 数据库会自动备份到 `/opt/kimuzhi/backups/`（保留最近 10 份）。
 
-### 方式 B：手动部署
+### 方式 B：宝塔面板 + Git（推荐用宝塔的话走这条）
+
+代码仓库：<https://github.com/wanliao/jmz>
+
+**1. 拉代码**（宝塔终端；建议目录 `/www/wwwroot/kimuzhi`）
+
+```bash
+cd /www/wwwroot
+git clone https://github.com/wanliao/jmz.git kimuzhi
+cd kimuzhi
+```
+
+**2. 装 Node**：宝塔「软件商店 → Node.js 版本管理器」装 **Node 24 LTS**（最低 22.5，因为用的是内置 `node:sqlite`，不需要额外数据库）。
+如果只能用 22.x，启动参数要加 `--experimental-sqlite`。
+
+**3. 建 Node 项目**：宝塔「网站 → Node 项目 → 添加」
+
+| 项 | 填 |
+|---|---|
+| 项目目录 | `/www/wwwroot/kimuzhi` |
+| 启动文件 | `server/index.js` |
+| 项目端口 | `8787` |
+| 运行用户 | `www` |
+| 安装依赖 | **不用**（零第三方依赖，不需要 `npm install`） |
+
+**4. 写 `.env`**（项目根目录新建）
+
+```ini
+PORT=8787
+HOST=127.0.0.1          # 由 Nginx 反代，别对外暴露 8787
+TIME_ZONE=Asia/Shanghai
+DB_FILE=./data/kimuzhi.db
+ADAPTER=http
+API_KEY=                # 接口服务设了密钥才填
+ALLOW_LOCAL_MODE=1
+AUTO_REFRESH_MINUTES=0
+SETTLE_GRACE_MS=600000
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=换成你自己的强密码
+```
+
+```bash
+mkdir -p data && chown -R www:www /www/wwwroot/kimuzhi && chmod -R 755 /www/wwwroot/kimuzhi
+```
+
+**5. 启动并自检**
+
+```bash
+curl http://127.0.0.1:8787/api/health
+node scripts/smoke.mjs http://127.0.0.1:8787
+```
+
+**6. 反向代理 + HTTPS**：宝塔建站点 → 设置 → 反向代理 → 目标 `http://127.0.0.1:8787`、发送域名 `$host`；
+再在 SSL 里申请 Let's Encrypt 证书并开启「强制 HTTPS」（手机「添加到主屏幕」需要 HTTPS）。
+
+**7. 以后升级代码**
+
+```bash
+cd /www/wwwroot/kimuzhi
+git pull
+# 然后在宝塔 Node 项目里点「重启」
+```
+
+> `.gitignore` 已经把 `data/`（数据库）和 `.env`（配置/密钥）排除在仓库外，所以 `git pull` **不会覆盖服务器上的数据和配置**。
+> 如果你在服务器上改过 `config/endpoints.json`，它会挡住 `git pull`，用
+> `git update-index --skip-worktree config/endpoints.json` 让 Git 忽略这个文件的本地改动，
+> 或者干脆把自定义项写进 `.env`（环境变量优先）。
+
+### 方式 C：手动部署（传统 systemd / Nginx）
 
 ```bash
 # 服务器上执行
 curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -   # 装 Node 24
 sudo apt-get install -y nodejs nginx
-sudo mkdir -p /opt/kimuzhi
-# 把项目文件传到 /opt/kimuzhi（可用 scp / git clone）
+sudo git clone https://github.com/wanliao/jmz.git /opt/kimuzhi
 cd /opt/kimuzhi
 sudo cp .env.example .env && sudo nano .env   # HOST 改 127.0.0.1，并配好 ADMIN_USERNAME/ADMIN_PASSWORD
 sudo cp deploy/kimuzhi.service /etc/systemd/system/kimuzhi.service
@@ -335,7 +402,9 @@ sudo nginx -t && sudo systemctl reload nginx
 curl http://127.0.0.1:8787/api/health
 ```
 
-### 方式 C：Docker
+升级：`cd /opt/kimuzhi && sudo git pull && sudo systemctl restart kimuzhi`。
+
+### 方式 D：Docker
 
 ```bash
 docker compose up -d --build
@@ -348,7 +417,7 @@ docker compose logs -f
 2. **马上改掉管理员密码**：登录 `/admin.html` → 「修改我的密码」，
    或在 `.env` 里配 `ADMIN_USERNAME` / `ADMIN_PASSWORD` 后重启；
 3. 有域名的话签个 HTTPS 证书，手机上才能「添加到主屏幕」长期使用：
-   `certbot --nginx -d 你的域名`；
+   宝塔在「SSL」里一键签发；手动部署用 `certbot --nginx -d 你的域名`；
 4. 验证部署：`node scripts/smoke.mjs http://127.0.0.1:8787`（只读检查应全部通过；
    想连「添加账号」一起测就加 `--nickname 你的角色名 --zone 1`）。
 
