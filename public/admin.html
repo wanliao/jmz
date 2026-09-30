@@ -90,7 +90,7 @@
             <table class="table" id="userTable">
               <thead>
                 <tr>
-                  <th>ID</th><th>账号</th><th>身份</th><th>游戏账号</th><th>本周已刷合计</th><th>会话</th><th>注册时间</th><th>操作</th>
+                  <th>ID</th><th>账号</th><th>身份</th><th>会话</th><th>注册时间</th><th>操作</th>
                 </tr>
               </thead>
               <tbody></tbody>
@@ -98,17 +98,23 @@
           </div>
         </section>
 
-        <!-- 游戏账号 -->
+        <!-- 游戏账号（全站唯一，不绑定用户；这里能看到全部） -->
         <section class="panel-block" data-panel="roles" hidden>
+          <p class="hint">
+            这里列出<strong>全站所有游戏账号</strong>（含未登录游客添加的），并且只有管理员能真正删除。
+            统计页每个人的列表是他们各自添加过的账号，互相看不到。
+            玩家在游戏里改名后，用新昵称在统计页再添加一次，这里的名字会自动更正（日志里记 <code>role.rename</code>）；
+            也可以直接点「编辑」手动改。
+          </p>
           <div class="toolbar">
-            <input id="roleFilter" class="toolbar-input" type="search" placeholder="搜索 roleId / 名字 / 归属账号" />
+            <input id="roleFilter" class="toolbar-input" type="search" placeholder="搜索 roleId / 名字 / 添加者" />
             <button class="btn btn-ghost btn-sm" id="reloadRoles" type="button">刷新</button>
           </div>
           <div class="table-wrap">
             <table class="table" id="roleTable">
               <thead>
                 <tr>
-                  <th>roleId</th><th>名字</th><th>大区</th><th>归属账号</th><th>上周点赞(基线)</th><th>当前总点赞</th><th>本周已刷</th><th>操作</th>
+                  <th>roleId</th><th>名字</th><th>大区</th><th>添加者</th><th>上周点赞(基线)</th><th>当前总点赞</th><th>本周已刷</th><th>操作</th>
                 </tr>
               </thead>
               <tbody></tbody>

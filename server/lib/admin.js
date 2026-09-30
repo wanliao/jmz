@@ -2,18 +2,30 @@
  * 管理员后台的业务逻辑。
  *
  * 能做的事（对应需求）：
- *  - 管理用户：查看、设为/取消管理员、改密码、删除（连带其游戏账号）
- *  - 管理用户的游戏账号：改名 / 改大区 / 改上周点赞(基线) / 改当前点赞 / 改 roleId / 改归属 / 删除
+ *  - 管理用户：查看、设为/取消管理员、改密码、删除（用户和游戏账号已经互不相干）
+ *  - 管理**全站共享**的游戏账号：改名 / 改大区 / 改上周点赞(基线) / 改当前点赞 / 改 roleId / 删除
+ *    （账号不绑定用户，所以后台列出的是全部账号，并标出是谁添加的）
  */
 
 import { WEEKLY_LIKE_CAP, isRegionId } from '../../shared/constants.js';
 import { getWeekStart } from '../../shared/week.js';
-import { HttpError, badRequest, notFound } from './errors.js';import { buildAccountView } from './settlement.js';
+import { HttpError, badRequest, notFound } from './errors.js';
+import { buildAccountView } from './settlement.js';
 
 const nowIso = (value = new Date()) => new Date(value).toISOString();
 
 /** 首页公告：存在 settings 表里，key = announcement，最长 500 字 */
 const ANNOUNCEMENT_MAX_LENGTH = 500;
+
+/** 审计日志里的 actor 变成后台能看懂的「添加者」文案 */
+function actorLabel(actor) {
+  const text = String(actor ?? '');
+  if (text === 'guest') return '游客（未登录）';
+  if (text === 'system') return '系统';
+  if (text.startsWith('user:')) return `用户 #${text.slice(5)}`;
+  if (text.startsWith('admin:')) return `管理员 #${text.slice(6)}`;
+  return text || '未知';
+}
 
 
 export function createAdminService({ config, repo, auth, adapters }) {
@@ -50,27 +62,11 @@ export function createAdminService({ config, repo, auth, adapters }) {
 
     /* ----------------------------------------------------------------- 用户 */
 
-    listUsers(now = new Date()) {
-      return repo.users.listUsers().map((user) => {
-        const roles = repo.roles.listRolesByUser(user.id);
-        const accounts = roles.map((role) => view(role, now));
-        return {
-          ...user,
-          roleCount: roles.length,
-          weekLikesTotal: accounts.reduce((sum, item) => sum + item.weekLikes, 0),
-          fullCount: accounts.filter((item) => item.full).length,
-          sessionCount: repo.sessions.countSessions(user.id),
-        };
-      });
-    },
-
-    getUserDetail(userId, now = new Date()) {
-      const user = requireUser(userId);
-      const roles = repo.roles.listRolesByUser(userId);
-      return {
-        user: { ...user, sessionCount: repo.sessions.countSessions(userId) },
-        accounts: roles.map((role) => view(role, now)),
-      };
+    listUsers() {
+      return repo.users.listUsers().map((user) => ({
+        ...user,
+        sessionCount: repo.sessions.countSessions(user.id),
+      }));
     },
 
     /** 把普通用户设为/取消管理员（只有超级管理员能做；超级管理员本身动不了） */
@@ -130,30 +126,25 @@ export function createAdminService({ config, repo, auth, adapters }) {
       if (user.isAdmin && !actor.isSuper) {
         throw new HttpError(403, 'SUPER_ONLY', '只有超级管理员能删除其他管理员');
       }
-      const roles = repo.roles.listRolesByUser(userId);
-      repo.users.deleteUser(userId); // 外键级联：这个用户名下的 roles 一起删
+      // 游戏账号是全站共享的，和用户没有关系：删用户不会动任何游戏账号
+      repo.users.deleteUser(userId);
       repo.audit.log({
         actor: `admin:${actor.id}`,
         action: 'admin.user.delete',
         target: String(userId),
-        detail: { username: user.username, roleCount: roles.length, roleIds: roles.map((r) => r.roleId) },
+        detail: { username: user.username },
       });
-      return { deleted: true, roleCount: roles.length };
+      return { deleted: true, roleCount: 0 };
     },
 
     /* ----------------------------------------------------------- 游戏账号 */
 
-    listRoles({ userId = null } = {}, now = new Date()) {
-      const roles = userId ? repo.roles.listRolesByUser(userId) : repo.roles.listAllRoles();
-      const users = new Map(repo.users.listUsers().map((user) => [user.id, user]));
-      return roles.map((role) => {
-        const owner = users.get(role.userId);
-        return {
-          ...view(role, now),
-          userId: role.userId,
-          ownerLabel: owner ? owner.username ?? `用户#${owner.id}` : `已删除的用户#${role.userId}`,
-        };
-      });
+    listRoles(now = new Date()) {
+      const addedBy = repo.audit.roleAddActors();
+      return repo.roles.listAllRoles().map((role) => ({
+        ...view(role, now),
+        addedBy: actorLabel(addedBy.get(role.roleId) ?? 'system'),
+      }));
     },
 
     /** 改名 / 改大区 / 改基线 / 改当前点赞数 */
@@ -225,26 +216,9 @@ export function createAdminService({ config, repo, auth, adapters }) {
         actor: `admin:${actor.id}`,
         action: 'admin.role.change-id',
         target: roleId,
-        detail: { from: role.roleId, to: target, owner: role.userId },
+        detail: { from: role.roleId, to: target },
       });
       return { account: view(repo.roles.getRole(target), new Date()), roleId: target };
-    },
-
-    /** 把某个 roleId 改归属到另一个用户（旧数据导入后挪给真正的用户，或者把账号转给别人） */
-    transferRole(actor, roleId, targetUserId) {
-      const role = requireRole(roleId);
-      const target = requireUser(targetUserId);
-      if (role.userId === target.id) {
-        throw badRequest('这个角色本来就属于该用户', 'ALREADY_OWNED');
-      }
-      const updated = repo.roles.updateRole(roleId, { user_id: target.id });
-      repo.audit.log({
-        actor: `admin:${actor.id}`,
-        action: 'admin.role.transfer',
-        target: roleId,
-        detail: { from: role.userId, to: target.id, toUsername: target.username },
-      });
-      return { account: view(updated, new Date()), from: role.userId, to: target.id };
     },
 
     deleteRole(actor, roleId) {
@@ -254,7 +228,7 @@ export function createAdminService({ config, repo, auth, adapters }) {
         actor: `admin:${actor.id}`,
         action: 'admin.role.delete',
         target: roleId,
-        detail: { owner: role.userId, nickname: role.nickname },
+        detail: { nickname: role.nickname },
       });
       return { deleted: true };
     },

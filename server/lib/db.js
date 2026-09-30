@@ -2,10 +2,11 @@
  * SQLite 数据库（Node 内置 node:sqlite，仍然零第三方依赖）。
  *
  * 表结构说明：
- *   users     用户（游客不存在数据库里，游客的账号只存浏览器本地）
+ *   users     用户（只用于登录 / 管理员权限，和游戏账号没有任何关系）
  *             is_admin = 普通管理员；is_super = 超级管理员（全站唯一，不能被降级/删除）
  *   sessions  登录会话（token 存本地，请求带 Authorization: Bearer <token>）
  *   roles     游戏账号：roleId + 名字 + 大区 + 上周点赞(基线) + 当前总点赞
+ *             ★ 全站共享：不绑定任何用户，谁都能添加/查看/修改（游客添加的也在库里）
  *             ★ 昵称只在 display_name 里，用于把 roleId 显示成人看得懂的名字
  *   audit_logs 操作日志（管理员改动留痕）
  *   settings  运行状态（例如「这一周的结算任务已经跑过了」）
@@ -135,6 +136,54 @@ const MIGRATIONS = [
         AND id = (SELECT MIN(id) FROM users WHERE is_admin = 1);
     `,
   },
+  {
+    version: 4,
+    name: 'roles-standalone',
+    sql: `
+      -- 游戏账号改为全站共享：不再绑定用户，游客（未登录）添加的账号同样入库、后台可见。
+      -- SQLite 不能直接 DROP COLUMN 掉带外键的列，所以整表重建后把数据原样搬过去。
+      CREATE TABLE IF NOT EXISTS roles_standalone (
+        role_id                TEXT PRIMARY KEY,
+        display_name           TEXT,
+        region                 TEXT NOT NULL,
+        baseline               INTEGER NOT NULL DEFAULT 0,
+        baseline_week_key      TEXT,
+        baseline_source        TEXT,
+        baseline_estimated     INTEGER NOT NULL DEFAULT 0,
+        baseline_updated_at    TEXT,
+        baseline_from_week_key TEXT,
+        profile_json           TEXT,
+        current_likes          INTEGER,
+        last_queried_at        TEXT,
+        last_snapshot_likes    INTEGER,
+        last_snapshot_week_key TEXT,
+        last_snapshot_at       TEXT,
+        last_error             TEXT,
+        created_at             TEXT NOT NULL,
+        updated_at             TEXT NOT NULL
+      );
+
+      INSERT OR IGNORE INTO roles_standalone (
+        role_id, display_name, region, baseline, baseline_week_key, baseline_source,
+        baseline_estimated, baseline_updated_at, baseline_from_week_key, profile_json,
+        current_likes, last_queried_at, last_snapshot_likes, last_snapshot_week_key, last_snapshot_at,
+        last_error, created_at, updated_at
+      )
+      SELECT
+        role_id, display_name, region, baseline, baseline_week_key, baseline_source,
+        baseline_estimated, baseline_updated_at, baseline_from_week_key, profile_json,
+        current_likes, last_queried_at, last_snapshot_likes, last_snapshot_week_key, last_snapshot_at,
+        last_error, created_at, updated_at
+      FROM roles;
+
+      DROP TABLE roles;
+      ALTER TABLE roles_standalone RENAME TO roles;
+      CREATE INDEX IF NOT EXISTS idx_roles_created ON roles(created_at);
+
+      -- 账号已经独立于用户，遗留的「游客用户」没有任何用处了，直接清掉
+      DELETE FROM users WHERE is_guest = 1;
+    `,
+  },
 ];
 
 /** 打开数据库并执行迁移 */
@@ -211,7 +260,6 @@ export function rowToRole(row) {
   }
   return {
     roleId: String(row.role_id),
-    userId: Number(row.user_id),
     nickname: row.display_name ?? '',
     region: row.region,
     profile,

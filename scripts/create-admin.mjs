@@ -30,15 +30,14 @@ function printUsers() {
     console.log('（还没有任何用户）');
     return;
   }
-  console.log(`共 ${users.length} 个用户：`);
+  console.log(`共 ${users.length} 个用户（用户只用于登录后台，游戏账号是全站共享的、不绑用户）：`);
   for (const user of users) {
-    const kind = user.isSuper ? '超级管理员' : user.isAdmin ? '管理员' : user.isGuest ? '游客' : '注册用户';
-    console.log(
-      `  #${String(user.id).padStart(3)}  ${String(user.username ?? '（无）').padEnd(20)} ${kind.padEnd(6)}  游戏账号 ${user.roleCount} 个`,
-    );
+    const kind = user.isSuper ? '超级管理员' : user.isAdmin ? '管理员' : '普通用户';
+    console.log(`  #${String(user.id).padStart(3)}  ${String(user.username ?? '（无）').padEnd(20)} ${kind}`);
   }
   const superUser = repo.users.getSuper();
   console.log(`\n超级管理员：${superUser ? `${superUser.username}（#${superUser.id}）` : '（还没有）'}`);
+  console.log(`游戏账号共 ${repo.roles.countRoles()} 个（全站共享）`);
 }
 
 function done(message) {

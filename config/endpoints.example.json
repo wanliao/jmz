@@ -26,7 +26,7 @@
   "apiKeyHeader": "",
 
   "apiA": {
-    "url": "https://hp.likeun.com/",
+    "url": "https://pubgapi.likeun.com/",
     "method": "GET",
     "headers": { "Accept": "application/json" },
     "query": {
@@ -57,7 +57,7 @@
   },
 
   "apiB": {
-    "url": "https://hp.likeun.com/",
+    "url": "https://pubgapi.likeun.com/",
     "method": "GET",
     "headers": { "Accept": "application/json" },
     "query": {

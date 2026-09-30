@@ -12,7 +12,7 @@
 
   "apiA": {
     "comment": "接口A：昵称 + 大区 -> 隐藏 roleId（同时带回点赞数与账号档案）。添加账号时走这个。",
-    "url": "https://hp.likeun.com/",
+    "url": "https://pubgapi.likeun.com/",
     "method": "GET",
     "headers": { "Accept": "application/json" },
     "query": {
@@ -47,7 +47,7 @@
 
   "apiB": {
     "comment": "接口B：roleId -> 当前总点赞数。只打荣耀接口，比接口A 轻，刷新走这个。",
-    "url": "https://hp.likeun.com/",
+    "url": "https://pubgapi.likeun.com/",
     "method": "GET",
     "headers": { "Accept": "application/json" },
     "query": {

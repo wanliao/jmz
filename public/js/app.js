@@ -1,6 +1,12 @@
 /**
  * 前端主逻辑：渲染卡片、增删改查、主题切换、离线缓存。
  *
+ * 账号模型：一个 roleId 在服务器上只有一条记录、不绑定任何用户；
+ * 但**主页只显示这台设备添加过的账号**——列表（一串 roleId）存在浏览器里，
+ * 服务端只按这批 roleId 返回数据，所以别人打开主页看不到你的列表。
+ * 添加别人已经加过的角色 = 把它「认领」进自己的列表（不重复入库、不动别人的数据）。
+ * 想彻底从数据库删掉，只能管理员在后台删。
+ *
  * 注意：所有「本周已刷」「基线」都由服务端算好后返回，
  * 前端只负责展示，避免浏览器时区/时钟与服务端不一致导致算错。
  */
@@ -18,8 +24,9 @@ import { escapeHtml, formatDuration, formatNumber, formatRelative } from './form
 
 const CACHE_KEY = 'hpjy.likes.cache.v1';
 const THEME_KEY = 'hpjy.likes.theme';
-/** 未登录时（本地模式）游戏账号存这里：只在这台浏览器，不入库 */
-const LOCAL_KEY = 'hpjy.local.accounts.v1';
+/** 这台设备添加过的 roleId 列表：服务器上人人可见，但**看哪些**由它决定 */
+const MY_ROLES_KEY = 'hpjy.my.roles.v1';
+const MAX_MY_ROLES = 100;
 
 const dom = {
   accountList: document.getElementById('accountList'),
@@ -91,45 +98,54 @@ const state = {
   editingRoleId: null,
   region: REGIONS[0]?.id ?? 'wechat',
   weeklyCap: WEEKLY_LIKE_CAP,
-  me: null, // 当前身份；user 为 null 表示未登录（本地模式）
-  localAccounts: [], // 本地模式下的账号（只在这台浏览器）
+  me: null, // 当前身份；user 为 null 表示未登录（不影响添加账号）
+  myRoleIds: [], // 这台设备添加过的 roleId（主页只显示这些）
 };
 
-/** 是否处于本地模式（未登录）：账号只存浏览器，不入库 */
-function isLocalMode() {
-  return !state.me?.user;
+/* --------------------------------------------------- 本机账号列表（roleId） */
+
+/** 清洗 roleId 列表：只留合法、去重，最多 MAX_MY_ROLES 个 */
+function normalizeMyRoleIds(roleIds) {
+  const seen = new Set();
+  const out = [];
+  for (const item of Array.isArray(roleIds) ? roleIds : []) {
+    const id = String(item ?? '').trim();
+    if (!/^\d{1,20}$/.test(id) || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+    if (out.length >= MAX_MY_ROLES) break;
+  }
+  return out;
 }
 
-/* --------------------------------------------------- 本地账号（localStorage） */
-
-function readLocalAccounts() {
+function readMyRoleIds() {
   try {
-    const raw = localStorage.getItem(LOCAL_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    const raw = localStorage.getItem(MY_ROLES_KEY);
+    return raw ? normalizeMyRoleIds(JSON.parse(raw)) : [];
   } catch {
     return [];
   }
 }
 
-function writeLocalAccounts(accounts) {
-  state.localAccounts = accounts;
+function writeMyRoleIds(roleIds) {
+  const list = normalizeMyRoleIds(roleIds);
+  state.myRoleIds = list;
   try {
-    if (accounts.length === 0) localStorage.removeItem(LOCAL_KEY);
-    else localStorage.setItem(LOCAL_KEY, JSON.stringify(accounts));
+    if (list.length === 0) localStorage.removeItem(MY_ROLES_KEY);
+    else localStorage.setItem(MY_ROLES_KEY, JSON.stringify(list));
   } catch {
     /* 隐私模式忽略 */
   }
+  return list;
 }
 
-function upsertLocalAccount(account) {
-  const list = state.localAccounts.slice();
-  const index = list.findIndex((item) => item.roleId === account.roleId);
-  if (index === -1) list.push(account);
-  else list[index] = account;
-  writeLocalAccounts(list);
-  return account;
+function addMyRoleId(roleId) {
+  if (state.myRoleIds.includes(roleId)) return state.myRoleIds;
+  return writeMyRoleIds([...state.myRoleIds, roleId]);
+}
+
+function removeMyRoleId(roleId) {
+  return writeMyRoleIds(state.myRoleIds.filter((id) => id !== roleId));
 }
 
 /* ------------------------------------------------------------------ 工具 */
@@ -174,22 +190,21 @@ function renderAccount() {
   dom.accountAvatar.textContent = user ? (label || '我').slice(0, 1).toUpperCase() : '游';
   dom.accountSub.textContent = user
     ? user.isSuper || user.isAdmin
-      ? '管理员 · 已同步云端'
-      : '已登录 · 云端同步'
-    : '未登录 · 本地模式';
+      ? '管理员 · 已登录'
+      : '已登录'
+    : '未登录 · 也能添加账号';
   dom.adminEntry.hidden = !user?.isAdmin;
   dom.guestNotice.hidden = Boolean(user);
 
-  const localCount = state.localAccounts.length;
   dom.accountInfoAvatar.textContent = user ? (label || '我').slice(0, 1).toUpperCase() : '游';
   dom.accountInfoName.textContent = label;
   dom.accountInfoDesc.textContent = user
-    ? `账号 #${user.id}${user.isSuper ? ' · 超级管理员' : user.isAdmin ? ' · 管理员' : ''} · 名下 ${
+    ? `账号 #${user.id}${user.isSuper ? ' · 超级管理员' : user.isAdmin ? ' · 管理员' : ''} · 全站共 ${
         me.roleCount ?? 0
       } 个游戏账号`
     : '';
 
-  // 未登录：不显示任何账号信息 / 改密码相关界面，只给注册登录
+  // 未登录：不显示账号信息 / 改密码相关界面，只给注册登录
   dom.accountInfo.hidden = true;
   dom.authForms.hidden = false;
   dom.logoutBtn.hidden = true;
@@ -202,19 +217,18 @@ function renderAccount() {
     dom.passwordForm.hidden = true;
     dom.logoutBtn.hidden = false;
     dom.changePasswordBtn.hidden = false;
-    dom.accountSyncHint.textContent = '已经登录，换手机或浏览器登录同一个账号即可看到这些账号。';
+    dom.accountSyncHint.textContent = '游戏账号是全站共享的，所有设备看到的是同一份数据，不需要同步。';
   } else {
-    dom.accountDialogTitle.textContent = '注册 / 登录';
+    dom.accountDialogTitle.textContent = '登录 / 注册';
     dom.passwordForm.hidden = true;
-    dom.registerHint.textContent = localCount > 0
-      ? `注册后可以把这台浏览器上的 ${localCount} 个游戏账号一起同步到云端，换设备登录也能看到。`
-      : '注册后游戏账号会保存到云端，换设备登录同一个账号就能看到。';
+    dom.registerHint.textContent = '游戏账号大家一起维护，不注册也能添加。登录只是为了进管理后台（没有后台权限的话不用注册）。';
   }
 }
 
 function showAccountDialog() {
   dom.accountDialog.showModal();
-  if (!state.me?.user) switchAuthTab('register');
+  // 未登录时游戏账号照样能用，这个弹窗只用来登录后台 / 注册身份
+  if (!state.me?.user) switchAuthTab('login');
   renderAccount();
 }
 
@@ -226,24 +240,9 @@ function switchAuthTab(tab) {
   dom.loginForm.hidden = tab !== 'login';
 }
 
-/**
- * 需要登录态的请求：token 失效（比如被管理员重置了密码）就退回本地模式再试一次。
- */
-async function withAuth(fn) {
-  try {
-    return await fn();
-  } catch (error) {
-    if (error.status !== 401) throw error;
-    api.clearToken();
-    state.me = { user: null, loggedIn: false, isAdmin: false, roleCount: 0 };
-    renderAccount();
-    throw error;
-  }
-}
-
 async function bootstrapIdentity() {
   state.me = await api.loadIdentity();
-  state.localAccounts = readLocalAccounts();
+  state.myRoleIds = readMyRoleIds();
   renderAccount();
   return state.me;
 }
@@ -495,7 +494,7 @@ async function loadConfig() {
 }
 
 /**
- * 拉取账号列表（云端或本地），返回拿到的那一份。
+ * 拉取本机列表里的账号，返回拿到的那一份。
  *
  * 并发调用会复用同一次请求（而不是直接返回空）——否则「页面加载」和「切回标签页」
  * 同时触发时，其中一方会拿到空列表，进而跳过自动刷新。
@@ -513,45 +512,28 @@ async function loadAccounts({ silent = false } = {}) {
 }
 
 async function doLoadAccounts({ silent = false } = {}) {
-  // 本地模式：账号就在浏览器里，只需要让服务端帮忙跨周结算一下（不落库、不联网）
-  if (isLocalMode()) {
-    state.localAccounts = readLocalAccounts();
-    if (state.localAccounts.length === 0) {
-      state.accounts = [];
-      saveCache();
-      render();
-      return state.accounts;
-    }
-    try {
-      // 只做跨周结算，不去查接口（避免每次打开页面都刷一遍点赞）
-      const data = await api.localSettle(state.localAccounts);
-      const accounts = data.accounts ?? [];
-      writeLocalAccounts(accounts);
-      state.accounts = accounts;
-      saveCache();
-      render();
-    } catch (error) {
-      // 服务端不可用时，至少把本地数据用缓存后的状态显示出来
-      state.accounts = state.localAccounts;
-      render();
-      if (!silent) showError(`读取本地账号失败：${error.message}`);
-    }
+  state.myRoleIds = readMyRoleIds();
+  if (state.myRoleIds.length === 0) {
+    state.accounts = [];
+    saveCache();
+    render();
     return state.accounts;
   }
 
   try {
-    const data = await withAuth(() => api.getAccounts());
+    const data = await api.queryAccounts(state.myRoleIds);
     mergeConfig(data);
     state.accounts = data.accounts ?? [];
-    if (data.user) {
-      state.me = { ...(state.me ?? {}), user: data.user, isAdmin: data.user.isAdmin };
-      renderAccount();
+    // 后台已经把某些账号删掉了：从本机列表里也清掉，免得每次都空查一遍
+    if (Array.isArray(data.missing) && data.missing.length > 0) {
+      writeMyRoleIds(state.myRoleIds.filter((id) => !data.missing.includes(id)));
     }
     saveCache();
     showError('');
     render();
   } catch (error) {
-    if (!silent) showError(`读取账号列表失败：${error.message}`);
+    // 服务端不可用时先用缓存把界面撑起来
+    if (!silent) showError(`读取账号失败：${error.message}`);
     render();
   }
   return state.accounts;
@@ -563,21 +545,7 @@ async function handleRefreshOne(roleId) {
   setBusy(roleId, true);
   render();
   try {
-    if (isLocalMode()) {
-      const target = state.localAccounts.find((item) => item.roleId === roleId);
-      if (!target) throw new Error('本地账号不存在');
-      const data = await api.localSync([target]);
-      const updated = (data.accounts ?? [])[0];
-      if (updated) {
-        upsertLocalAccount(updated);
-        upsertAccount(updated);
-        saveCache();
-      }
-      if (data.failed > 0) toast(`刷新失败：${data.errors?.[0]?.error?.message ?? '接口异常'}`, 'warn', 5000);
-      else toast(`「${updated?.nickname ?? roleId}」本周已刷 ${formatNumber(updated?.weekLikes ?? 0)}`, 'ok');
-      return;
-    }
-    const data = await withAuth(() => api.refreshAccount(roleId));
+    const data = await api.refreshAccount(roleId);
     upsertAccount(data.account);
     saveCache();
     if (data.warning) toast(`「${data.account.nickname}」查询失败：${data.warning.message}`, 'warn', 5000);
@@ -591,32 +559,22 @@ async function handleRefreshOne(roleId) {
 }
 
 async function handleRefreshAll() {
+  if (state.myRoleIds.length === 0) {
+    toast('还没有账号可刷新', 'info');
+    return;
+  }
   dom.refreshAllBtn.disabled = true;
   dom.refreshAllBtn.classList.add('is-busy');
   try {
-    if (isLocalMode()) {
-      if (state.localAccounts.length === 0) {
-        toast('还没有账号可刷新', 'info');
-        return;
-      }
-      const data = await api.localSync(state.localAccounts);
-      const accounts = data.accounts ?? [];
-      writeLocalAccounts(accounts);
-      state.accounts = accounts;
-      saveCache();
-      render();
-      if (data.failed > 0) toast(`刷新完成：成功 ${data.succeeded} 个，失败 ${data.failed} 个`, 'warn', 4600);
-      else toast(`已刷新 ${data.succeeded} 个本地账号`, 'ok');
-      return;
-    }
-    const data = await withAuth(() => api.refreshAll());
+    const data = await api.refreshAll(state.myRoleIds);
     state.accounts = data.accounts ?? state.accounts;
+    if (Array.isArray(data.missing) && data.missing.length > 0) {
+      writeMyRoleIds(state.myRoleIds.filter((id) => !data.missing.includes(id)));
+    }
     saveCache();
     render();
     if (data.failed > 0) {
       toast(`刷新完成：成功 ${data.succeeded} 个，失败 ${data.failed} 个`, 'warn', 4600);
-    } else if (data.total === 0) {
-      toast('还没有账号可刷新', 'info');
     } else {
       toast(`已刷新 ${data.succeeded} 个账号`, 'ok');
     }
@@ -682,44 +640,27 @@ async function handleAddSubmit(event) {
   dom.addSubmitBtn.textContent = '查询中…';
 
   try {
-    if (isLocalMode()) {
-      // 本地模式：本机已经加过的 roleId 不能再加（服务端不知道我们本地有什么）
-      const data = await api.localAdd({ nickname, region: state.region, lastWeekLikes });
-      const existed = state.localAccounts.some((item) => item.roleId === data.account.roleId);
-      if (existed) {
-        dom.addFormError.textContent = `「${data.account.nickname}」你已经添加过了（这台浏览器上）`;
-        dom.addFormError.hidden = false;
-        return;
-      }
-      upsertLocalAccount(data.account);
-      upsertAccount(data.account);
-      saveCache();
-      render();
-      dom.addDialog.close();
-      toast(`已添加「${data.account.nickname}」（存在这台浏览器上，注册后会同步到云端）`, 'ok', 4600);
-      if (data.warning) toast(`首次查询失败：${data.warning.message}，可稍后点刷新重试`, 'warn', 5000);
-      return;
-    }
-
-    const data = await withAuth(() => api.addAccount({ nickname, region: state.region, lastWeekLikes }));
+    const data = await api.addAccount({ nickname, region: state.region, lastWeekLikes });
+    addMyRoleId(data.account.roleId);
     upsertAccount(data.account);
     saveCache();
     render();
     dom.addDialog.close();
-    toast(`已添加「${data.account.nickname}」`, 'ok');
+    if (data.renamed) {
+      // 玩家在游戏里改了名：用新昵称再添加一次就会自动更正库里的名字
+      toast(
+        `「${data.renamed.from}」在游戏里改名了 → 已更新为「${data.renamed.to}」，并加入你的列表`,
+        'ok',
+        5600,
+      );
+    } else if (data.claimed) {
+      toast(`「${data.account.nickname}」之前已经有人加过了，已加入你的列表`, 'ok', 4600);
+    } else {
+      toast(`已添加「${data.account.nickname}」`, 'ok');
+    }
     if (data.warning) toast(`首次查询失败：${data.warning.message}，可稍后点刷新重试`, 'warn', 5000);
   } catch (error) {
-    if (error.code === 'DUPLICATE_ACCOUNT') {
-      fail(error.message);
-      const existing = error.details?.existing;
-      if (existing) {
-        upsertAccount(existing);
-        saveCache();
-        render();
-      }
-    } else {
-      fail(error.message);
-    }
+    fail(error.message);
   } finally {
     dom.addSubmitBtn.disabled = false;
     dom.addSubmitBtn.textContent = '添加并查询';
@@ -740,19 +681,7 @@ async function handleBaselineSubmit(event) {
   dom.baselineSubmitBtn.disabled = true;
   dom.baselineSubmitBtn.textContent = '保存中…';
   try {
-    if (isLocalMode()) {
-      const target = state.localAccounts.find((item) => item.roleId === roleId) ?? state.accounts.find((item) => item.roleId === roleId);
-      if (!target) throw new Error('本地账号不存在');
-      const data = await api.localSetBaseline(target, value);
-      upsertLocalAccount(data.account);
-      upsertAccount(data.account);
-      saveCache();
-      render();
-      dom.baselineDialog.close();
-      toast(`已更新上周点赞，本周已刷 ${formatNumber(data.account.weekLikes)}`, 'ok');
-      return;
-    }
-    const data = await withAuth(() => api.updateBaseline(roleId, value));
+    const data = await api.updateBaseline(roleId, value);
     upsertAccount(data.account);
     saveCache();
     render();
@@ -770,30 +699,17 @@ async function handleBaselineSubmit(event) {
 async function handleDelete(roleId) {
   const account = state.accounts.find((item) => item.roleId === roleId);
   if (!account) return;
-  const hint = isLocalMode() ? '（只删这台浏览器上的记录，服务端没有存）' : '';
-  if (!window.confirm(`确定删除「${account.nickname}」吗？${hint}`)) return;
-  try {
-    if (isLocalMode()) {
-      writeLocalAccounts(state.localAccounts.filter((item) => item.roleId !== roleId));
-      state.accounts = state.accounts.filter((item) => item.roleId !== roleId);
-      saveCache();
-      render();
-      toast('已删除', 'ok');
-      return;
-    }
-    await withAuth(() => api.removeAccount(roleId));
-    state.accounts = state.accounts.filter((item) => item.roleId !== roleId);
-    saveCache();
-    render();
-    toast('已删除', 'ok');
-  } catch (error) {
-    toast(`删除失败：${error.message}`, 'error');
-  }
+  const hint = '只从这台设备的列表里移除，服务器上的数据还在（后台仍能看到）。';
+  if (!window.confirm(`把「${account.nickname}」从你的列表里移除？\n${hint}`)) return;
+  removeMyRoleId(roleId);
+  state.accounts = state.accounts.filter((item) => item.roleId !== roleId);
+  saveCache();
+  render();
+  toast('已从你的列表移除（后台数据没动）', 'ok');
 }
 
-/** 登录/注册成功后：重建身份、把本地账号按需搬到云端、重新拉数据 */
-async function afterAuthSwitch(message, { migrateLocal = false } = {}) {
-  const localBefore = readLocalAccounts();
+/** 登录/注册成功后：重建身份、重新拉一次本机列表 */
+async function afterAuthSwitch(message) {
   state.accounts = [];
   try {
     localStorage.removeItem(CACHE_KEY);
@@ -802,24 +718,9 @@ async function afterAuthSwitch(message, { migrateLocal = false } = {}) {
   }
 
   await bootstrapIdentity();
-
-  let migrated = 0;
-  if (migrateLocal && localBefore.length > 0) {
-    try {
-      const result = await api.importLocalAccounts(localBefore);
-      migrated = result.imported ?? 0;
-      writeLocalAccounts([]); // 搬上云之后本地不再留一份
-      if (result.skipped > 0) {
-        toast(`有 ${result.skipped} 个账号云端已经有了，跳过`, 'info', 4000);
-      }
-    } catch (error) {
-      toast(`本地账号同步到云端失败：${error.message}`, 'error', 6000);
-    }
-  }
-
   await loadAccounts();
   renderAccount();
-  if (message) toast(migrated > 0 ? `${message}，已同步 ${migrated} 个本地账号到云端` : message, 'ok', 4200);
+  if (message) toast(message, 'ok', 4200);
 }
 
 async function handleRegisterSubmit(event) {
@@ -833,24 +734,19 @@ async function handleRegisterSubmit(event) {
   if (!username) return fail('请输入账号');
   if (!password) return fail('请输入密码');
 
-  const localCount = state.localAccounts.length;
-  const migrateLocal =
-    localCount > 0 &&
-    window.confirm(`把这台浏览器上的 ${localCount} 个游戏账号一起同步到云端吗？\n（同步后换设备登录也能看到；选「取消」则只注册，本地账号留在本机）`);
-
   dom.registerError.hidden = true;
   dom.registerSubmit.disabled = true;
   dom.registerSubmit.textContent = '注册中…';
   try {
     const data = await api.register(username, password);
     api.setToken(data.token);
-    await afterAuthSwitch('注册成功', { migrateLocal });
+    await afterAuthSwitch('注册成功');
     dom.accountDialog.close();
   } catch (error) {
     fail(error.message);
   } finally {
     dom.registerSubmit.disabled = false;
-    dom.registerSubmit.textContent = '注册并继续';
+    dom.registerSubmit.textContent = '注册';
   }
 }
 
@@ -864,18 +760,13 @@ async function handleLoginSubmit(event) {
   };
   if (!username || !password) return fail('请输入账号和密码');
 
-  const localCount = state.localAccounts.length;
-  const migrateLocal =
-    localCount > 0 &&
-    window.confirm(`登录后要把这台浏览器上的 ${localCount} 个游戏账号同步到该账号下吗？`);
-
   dom.loginError.hidden = true;
   dom.loginSubmit.disabled = true;
   dom.loginSubmit.textContent = '登录中…';
   try {
     const data = await api.login(username, password);
     api.setToken(data.token);
-    await afterAuthSwitch(`已登录 ${data.user.username}`, { migrateLocal });
+    await afterAuthSwitch(`已登录 ${data.user.username}`);
     dom.accountDialog.close();
   } catch (error) {
     fail(error.message);
@@ -886,16 +777,7 @@ async function handleLoginSubmit(event) {
 }
 
 async function handleLogout() {
-  const localCount = state.localAccounts.length;
-  if (
-    !window.confirm(
-      `退出登录后会回到「未登录」状态（云端数据仍在，重新登录即可看到）。${
-        localCount > 0 ? `\n注意：这台浏览器上还有 ${localCount} 个本地账号。` : ''
-      }`,
-    )
-  ) {
-    return;
-  }
+  if (!window.confirm('退出登录后会回到「未登录」状态（游戏账号是全站共享的，不受影响）。')) return;
   try {
     await api.logout();
   } catch {
@@ -1004,7 +886,7 @@ let lastAutoRefreshAt = 0;
 
 async function autoRefreshLikes({ force = false } = {}) {
   if (autoRefreshing) return;
-  if (state.accounts.length === 0 && state.localAccounts.length === 0) return;
+  if (state.myRoleIds.length === 0) return;
   // 切标签页会反复触发，1 分钟内不重复刷
   if (!force && Date.now() - lastAutoRefreshAt < 60_000) return;
 
@@ -1014,14 +896,10 @@ async function autoRefreshLikes({ force = false } = {}) {
   dom.refreshAllBtn.classList.add('is-busy');
 
   try {
-    if (isLocalMode()) {
-      const data = await api.localSync(state.localAccounts);
-      const accounts = data.accounts ?? [];
-      writeLocalAccounts(accounts);
-      state.accounts = accounts;
-    } else {
-      const data = await withAuth(() => api.refreshAll());
-      state.accounts = data.accounts ?? state.accounts;
+    const data = await api.refreshAll(state.myRoleIds);
+    state.accounts = data.accounts ?? state.accounts;
+    if (Array.isArray(data.missing) && data.missing.length > 0) {
+      writeMyRoleIds(state.myRoleIds.filter((id) => !data.missing.includes(id)));
     }
     saveCache();
     render();
@@ -1039,12 +917,13 @@ async function main() {
   applyTheme(loadTheme());
   buildRegionSegmented();
   bindEvents();
+  state.myRoleIds = readMyRoleIds();
   renderAccount();
 
-  // 先用本地缓存把界面渲染出来，再拉服务器数据
+  // 先用本地缓存把界面渲染出来，再拉服务器数据（只渲染本机列表里的那些）
   const cached = readCache();
   if (cached) {
-    state.accounts = cached.accounts;
+    state.accounts = (cached.accounts ?? []).filter((item) => state.myRoleIds.includes(item.roleId));
     if (Number.isFinite(Number(cached.weeklyCap))) state.weeklyCap = Number(cached.weeklyCap);
     render();
   } else {

@@ -95,26 +95,15 @@ after(async () => {
 });
 
 let userSeq = 0;
-/** 造一个带账号的注册用户，返回 { token, roleId, userId } */
+/** 造一个游戏账号（全站共享，不需要登录），返回 { roleId } */
 async function makeAccount(nickname) {
   userSeq += 1;
-  const registered = await call('/api/auth/register', {
-    method: 'POST',
-    body: { username: `sched${Date.now().toString().slice(-5)}${userSeq}`, password: 'pw123456' },
-  });
-  assert.equal(registered.status, 201, JSON.stringify(registered.json));
-  const token = registered.json.data.token;
   const created = await call('/api/accounts', {
     method: 'POST',
-    token,
-    body: { nickname, region: 'qq', lastWeekLikes: 1000 },
+    body: { nickname: `${nickname}${userSeq}`, region: 'qq', lastWeekLikes: 1000 },
   });
   assert.equal(created.status, 201, JSON.stringify(created.json));
-  return {
-    token,
-    roleId: created.json.data.account.roleId,
-    userId: registered.json.data.user.id,
-  };
+  return { roleId: created.json.data.account.roleId };
 }
 
 test('周一 00:00:02 的 tick 会自动结算并推进基线', async () => {
@@ -192,7 +181,7 @@ test('服务器停机错过窗口、同一周内重启后补跑一次', async ()
   assert.equal(after.baselineSource, 'cron');
 });
 
-test('结算后用户看到的「本周已刷」归零，且基线来源是 cron', async () => {
+test('结算后「本周已刷」归零，且基线来源是 cron', async () => {
   // 用独立账号，避免被前面「时钟回拨」的用例影响
   const account = await makeAccount('定时任务测试丁');
   const currentWeek = getWeekStart(new Date(), TZ);
@@ -203,7 +192,7 @@ test('结算后用户看到的「本周已刷」归零，且基线来源是 cron
   await app.scheduler.runNow();
 
   // HTTP 层用的是真实时钟（此时假时钟在未来），所以这里直接用同一个假时钟取视图
-  const accounts = await app.service.listAccounts(account.userId, clock.now);
+  const { accounts } = await app.service.queryAccounts([account.roleId], clock.now);
   const view = accounts.find((item) => item.roleId === account.roleId);
   assert.ok(view);
   assert.equal(view.baselineSource, 'cron');
@@ -218,7 +207,10 @@ test('结算后用户看到的「本周已刷」归零，且基线来源是 cron
 
 test('假时钟在未来时，接口层会用真实时钟把基线拉回当前周（时钟回拨保护）', async () => {
   const account = globalThis.__schedD;
-  const list = await call('/api/accounts', { token: account.token });
+  const list = await call('/api/accounts/query', {
+    method: 'POST',
+    body: { roleIds: [account.roleId] },
+  });
   const view = list.json.data.accounts.find((item) => item.roleId === account.roleId);
   assert.ok(view);
   assert.equal(

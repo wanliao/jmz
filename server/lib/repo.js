@@ -22,25 +22,14 @@ export function createRepo(db) {
   const updateAdminFlag = stmt('UPDATE users SET is_admin = ? WHERE id = ?');
   const clearSuper = stmt('UPDATE users SET is_super = 0 WHERE is_super = 1');
   const setSuperFlag = stmt('UPDATE users SET is_admin = 1, is_super = 1 WHERE id = ?');
-  const updateCredentials = stmt(
-    'UPDATE users SET username = ?, password_hash = ?, is_guest = 0 WHERE id = ?',
-  );
   const updatePassword = stmt('UPDATE users SET password_hash = ? WHERE id = ?');
   const deleteUserStmt = stmt('DELETE FROM users WHERE id = ?');
   const listUsersStmt = stmt(`
-    SELECT u.*,
-           (SELECT COUNT(*) FROM roles r WHERE r.user_id = u.id) AS role_count
+    SELECT u.*
     FROM users u
     ORDER BY u.is_guest ASC, u.id DESC
   `);
   const countUsersStmt = stmt('SELECT COUNT(*) AS total FROM users');
-
-  /** 新建游客用户 */
-  function createGuest({ userAgent = null } = {}) {
-    const at = nowIso();
-    const info = insertUser.run(null, null, 1, 0, at, at);
-    return rowToUser(selectUserById.get(Number(info.lastInsertRowid)));
-  }
 
   function createUser({ username, passwordHash, isAdmin = false }) {
     const at = nowIso();
@@ -77,21 +66,12 @@ export function createRepo(db) {
   const getSuper = () => listUsersStmt.all().map(rowToUser).find((user) => user.isSuper) ?? null;
   const setPassword = (id, passwordHash) => updatePassword.run(passwordHash, Number(id));
 
-  /** 游客升级为注册用户（数据保留，用户 id 不变） */
-  function upgradeGuest(id, { username, passwordHash }) {
-    updateCredentials.run(username, passwordHash, Number(id));
-    return getUser(id);
-  }
-
   function deleteUser(id) {
     return deleteUserStmt.run(Number(id)).changes > 0;
   }
 
   function listUsers() {
-    return listUsersStmt.all().map((row) => ({
-      ...rowToUser(row),
-      roleCount: Number(row.role_count ?? 0),
-    }));
+    return listUsersStmt.all().map(rowToUser);
   }
 
   const countUsers = () => Number(countUsersStmt.get()?.total ?? 0);
@@ -133,15 +113,14 @@ export function createRepo(db) {
 
   const insertRole = stmt(`
     INSERT INTO roles (
-      role_id, user_id, display_name, region, baseline, baseline_week_key, baseline_source,
+      role_id, display_name, region, baseline, baseline_week_key, baseline_source,
       baseline_estimated, baseline_updated_at, baseline_from_week_key, profile_json,
       current_likes, last_queried_at, last_snapshot_likes, last_snapshot_week_key, last_snapshot_at,
       last_error, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const selectRole = stmt('SELECT * FROM roles WHERE role_id = ?');
-  const selectRolesByUser = stmt('SELECT * FROM roles WHERE user_id = ? ORDER BY created_at ASC');
-  const selectAllRoles = stmt('SELECT * FROM roles ORDER BY user_id ASC, created_at ASC');
+  const selectAllRoles = stmt('SELECT * FROM roles ORDER BY created_at ASC, role_id ASC');
   const deleteRoleStmt = stmt('DELETE FROM roles WHERE role_id = ?');
   const countRolesStmt = stmt('SELECT COUNT(*) AS total FROM roles');
   const countRolesBySource = stmt(
@@ -178,8 +157,6 @@ export function createRepo(db) {
     lastSnapshotAt: 'last_snapshot_at',
     last_error: 'last_error',
     lastError: 'last_error',
-    user_id: 'user_id',
-    userId: 'user_id',
     updated_at: 'updated_at',
     updatedAt: 'updated_at',
   };
@@ -188,7 +165,6 @@ export function createRepo(db) {
     const at = nowIso();
     insertRole.run(
       String(role.roleId),
-      Number(role.userId),
       role.nickname ?? null,
       role.region ?? '',
       Number(role.baseline ?? 0),
@@ -211,7 +187,6 @@ export function createRepo(db) {
   }
 
   const getRole = (roleId) => rowToRole(selectRole.get(String(roleId)));
-  const listRolesByUser = (userId) => selectRolesByUser.all(Number(userId)).map(rowToRole);
   const listAllRoles = () => selectAllRoles.all().map(rowToRole);
   const deleteRole = (roleId) => deleteRoleStmt.run(String(roleId)).changes > 0;
   const countRoles = () => Number(countRolesStmt.get()?.total ?? 0);
@@ -262,12 +237,12 @@ export function createRepo(db) {
     try {
       db.prepare(
         `INSERT INTO roles (
-           role_id, user_id, display_name, region, baseline, baseline_week_key, baseline_source,
+           role_id, display_name, region, baseline, baseline_week_key, baseline_source,
            baseline_estimated, baseline_updated_at, baseline_from_week_key, profile_json,
            current_likes, last_queried_at, last_snapshot_likes, last_snapshot_week_key, last_snapshot_at,
            last_error, created_at, updated_at
          )
-         SELECT ?, user_id, display_name, region, baseline, baseline_week_key, baseline_source,
+         SELECT ?, display_name, region, baseline, baseline_week_key, baseline_source,
                 baseline_estimated, baseline_updated_at, baseline_from_week_key, profile_json,
                 current_likes, last_queried_at, last_snapshot_likes, last_snapshot_week_key, last_snapshot_at,
                 last_error, created_at, updated_at
@@ -301,6 +276,23 @@ export function createRepo(db) {
 
   const listAudits = (limit = 50) => selectAudits.all(Number(limit)).map(rowToAudit);
 
+  /**
+   * 每个游戏账号「是谁添加的」——从操作日志里取（roles 表本身不记归属）。
+   * 返回 Map<roleId, actor>，同一个 roleId 有多次记录时以最新一次为准。
+   */
+  const selectRoleAddActors = stmt(`
+    SELECT target, actor, MAX(id) AS last_id
+    FROM audit_logs
+    WHERE action = 'role.add' AND target IS NOT NULL
+    GROUP BY target
+  `);
+
+  function roleAddActors() {
+    const map = new Map();
+    for (const row of selectRoleAddActors.all()) map.set(String(row.target), String(row.actor));
+    return map;
+  }
+
   /* -------------------------------------------------------------- settings */
 
   const selectSetting = stmt('SELECT value FROM settings WHERE key = ?');
@@ -331,9 +323,7 @@ export function createRepo(db) {
   return {
     raw: db,
     users: {
-      createGuest,
       createUser,
-      upgradeGuest,
       getUser,
       getUserByUsername,
       touchUser,
@@ -356,14 +346,13 @@ export function createRepo(db) {
     roles: {
       createRole,
       getRole,
-      listRolesByUser,
       listAllRoles,
       updateRole,
       changeRoleId,
       deleteRole,
       countRoles,
     },
-    audit: { log, listAudits },
+    audit: { log, listAudits, roleAddActors },
     settings: { get: getSetting, set: setSetting, all: allSettings },
     stats,
   };

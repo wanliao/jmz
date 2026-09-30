@@ -3,11 +3,12 @@
  *
  * 用法：
  *   node scripts/smoke.mjs                                    # 只读检查（不会写任何数据）
- *   node scripts/smoke.mjs --nickname 你的角色名 --zone 1       # 顺便测「注册 → 添加账号 → 刷新 → 删除」
- *   node scripts/smoke.mjs --nickname 角色名 --admin admin:密码  # 测完顺便把临时用户删掉
+ *   node scripts/smoke.mjs --nickname 你的角色名 --zone 1       # 顺便测「添加 → 认领 → 刷新 → 改基线」
+ *   node scripts/smoke.mjs --nickname 角色名 --admin admin:密码  # 测完顺手把临时账号从库里删掉
  *
  * 说明：
- *   - 未登录时是「本地模式」（账号只存浏览器），所以服务端只读检查不涉及数据库写入；
+ *   - 账号全站唯一、不绑用户，未登录也能添加；但列表是「本机视图」：
+ *     读账号必须给 roleIds，服务端不会下发全库列表；
  *   - 真实接口模式下「添加账号」会真的查一次接口 A，所以必须显式给 --nickname 才测写入。
  */
 
@@ -69,8 +70,6 @@ check('GET /api/config', config.status === 200 && config.json?.data?.weeklyCap =
   `适配器=${adapterMode} 时区=${config.json?.data?.timeZone}`);
 check('游戏周起点在下周之前', config.json?.data?.week?.startMs < config.json?.data?.week?.endMs,
   `本周 ${config.json?.data?.week?.key}`);
-check('本地模式开关已暴露给前端', typeof config.json?.data?.allowLocalMode === 'boolean',
-  `allowLocalMode=${config.json?.data?.allowLocalMode}`);
 const home = await call('/');
 check('GET / 返回前端页面', home.status === 200 && home.text.includes('金拇指'));
 const adminPage = await call('/admin.html');
@@ -78,111 +77,108 @@ check('GET /admin.html 返回管理后台', adminPage.status === 200 && adminPag
 const shared = await call('/shared/constants.js');
 check('GET /shared/constants.js', shared.status === 200 && shared.text.includes('WEEKLY_LIKE_CAP'));
 
-console.log('\n[2] 鉴权：没有游客身份了，未登录不能读云端数据');
-const anonymous = await call('/api/accounts');
-check('没有 token 访问账号接口返回 401', anonymous.status === 401, anonymous.json?.error?.code);
+console.log('\n[2] 账号接口：不需要登录，但读列表必须给 roleIds（别想拉走全库）');
+const legacyList = await call('/api/accounts');
+check('旧的「列出全部账号」接口已移除（404）', legacyList.status === 404);
+const noIds = await call('/api/accounts/query', { method: 'POST', body: {} });
+check('不给 roleIds 查询被拒（400 INVALID_ROLE_IDS）',
+  noIds.status === 400 && noIds.json?.error?.code === 'INVALID_ROLE_IDS');
+const emptyQuery = await call('/api/accounts/query', { method: 'POST', body: { roleIds: [] } });
+check('空 roleIds 返回空列表（不会下发全库）',
+  emptyQuery.status === 200 && emptyQuery.json?.data?.accounts?.length === 0);
 const guestEndpoint = await call('/api/auth/guest', { method: 'POST' });
 check('旧的游客接口已移除（404）', guestEndpoint.status === 404);
+const localEndpoint = await call('/api/local/settle', { method: 'POST', body: { accounts: [] } });
+check('旧的本地模式接口已移除（404）', localEndpoint.status === 404);
 const me = await call('/api/auth/me');
 check('未登录时 /api/auth/me 返回 user: null', me.status === 200 && me.json?.data?.user === null);
-
-console.log('\n[3] 本地模式接口（不落库、不消耗接口调用）');
-if (config.json?.data?.allowLocalMode) {
-  const settle = await call('/api/local/settle', { method: 'POST', body: { accounts: [] } });
-  check('POST /api/local/settle（空列表）', settle.status === 200 && Array.isArray(settle.json?.data?.accounts),
-    `账号数 ${settle.json?.data?.accounts?.length ?? '-'}`);
-  const sync = await call('/api/local/sync', { method: 'POST', body: { accounts: [] } });
-  check('POST /api/local/sync（空列表）', sync.status === 200 && sync.json?.data?.total === 0);
-  const dirty = await call('/api/local/sync', {
-    method: 'POST',
-    body: { accounts: [{ roleId: 'abc', region: 'qq' }] },
-  });
-  check('非法本地账号会被丢弃而不是报错', dirty.status === 200 && dirty.json?.data?.dropped === 1);
-} else {
-  console.log('    服务端已关闭本地模式（ALLOW_LOCAL_MODE=0），跳过');
-}
+const adminGuard = await call('/api/admin/overview');
+check('未登录访问管理接口返回 401', adminGuard.status === 401, adminGuard.json?.error?.code);
 
 // ---- 写入流程：mock 模式随便测；真实接口模式必须给真实角色名 ----
 const canWrite = adapterMode === 'mock' || Boolean(realNickname);
-let tempUserId = null;
+let createdRoleId = null;
 
 if (!canWrite) {
-  console.log('\n[4] 跳过「注册 + 添加账号」写入流程');
+  console.log('\n[3] 跳过「添加账号」写入流程');
   console.log('    当前是真实接口模式：加账号会真的调用接口 A 查询角色。');
   console.log('    要测这条路径就带上真实角色名，例如：');
   console.log('      node scripts/smoke.mjs --nickname 你的角色名 --zone 1     (1 = QQ区, 2 = 微信区)');
 } else {
-  const username = `smoke${Date.now().toString().slice(-7)}`;
-  console.log(`\n[4] 注册临时用户 ${username} 并走一遍写入流程`);
+  console.log('\n[3] 未登录（游客）直接走一遍写入流程');
 
-  const registered = await call('/api/auth/register', {
+  const nickname = realNickname ?? `冒烟测试${Date.now().toString().slice(-6)}`;
+  const region = realNickname ? (realZone === 2 ? 'wechat' : 'qq') : 'qq';
+
+  const created = await call('/api/accounts', {
     method: 'POST',
-    body: { username, password: 'smoke-password' },
+    body: { nickname, region, lastWeekLikes: 1000 },
   });
-  check('POST /api/auth/register', registered.status === 201, registered.json?.error?.message ?? '');
-  const token = registered.json?.data?.token;
-  tempUserId = registered.json?.data?.user?.id ?? null;
-
-  if (token) {
-    const nickname = realNickname ?? `冒烟测试${Date.now().toString().slice(-6)}`;
-    const region = realNickname ? (realZone === 2 ? 'wechat' : 'qq') : 'qq';
-
-    const created = await call('/api/accounts', {
-      method: 'POST',
-      token,
-      body: { nickname, region, lastWeekLikes: 1000 },
-    });
-    check('POST /api/accounts', created.status === 201, created.json?.error?.message ?? '');
-    const account = created.json?.data?.account;
-    check('拿到隐藏 roleId', /^\d+$/.test(String(account?.roleId ?? '')), `roleId=${account?.roleId}`);
+  check('POST /api/accounts（不登录也能添加）',
+    created.status === 201 || (created.status === 200 && created.json?.data?.claimed === true),
+    created.json?.error?.message ?? '');
+  const account = created.json?.data?.account;
+  createdRoleId = account?.roleId ?? null;
+  check('拿到隐藏 roleId', /^\d+$/.test(String(account?.roleId ?? '')), `roleId=${account?.roleId}`);
+  if (!created.json?.data?.claimed) {
     check('本周已刷 = 当前总点赞 − 上周点赞',
       account?.weekLikes === Math.max(0, (account?.currentLikes ?? 0) - (account?.baseline ?? 0)),
       `本周已刷=${account?.weekLikes} / 350`);
-
-    const duplicate = await call('/api/accounts', {
-      method: 'POST',
-      token,
-      body: { nickname, region, lastWeekLikes: 1000 },
-    });
-    check('重复添加同一个角色返回 409',
-      duplicate.status === 409 && duplicate.json?.error?.code === 'DUPLICATE_ACCOUNT');
-
-    const refreshed = await call(`/api/accounts/${account?.roleId}/refresh`, { method: 'POST', token });
-    check('POST /api/accounts/:roleId/refresh',
-      refreshed.status === 200 && Boolean(refreshed.json?.data?.account),
-      refreshed.json?.data?.warning?.message ?? `本周已刷=${refreshed.json?.data?.account?.weekLikes}`);
-
-    const fixed = await call(`/api/accounts/${account?.roleId}`, {
-      method: 'PATCH',
-      token,
-      body: { lastWeekLikes: refreshed.json?.data?.account?.currentLikes ?? 0 },
-    });
-    check('PATCH /api/accounts/:roleId（修正基线）',
-      fixed.status === 200 && fixed.json?.data?.account?.weekLikes === 0);
-
-    const removed = await call(`/api/accounts/${account?.roleId}`, { method: 'DELETE', token });
-    check('DELETE /api/accounts/:roleId', removed.status === 200);
   }
+
+  const mine = await call('/api/accounts/query', { method: 'POST', body: { roleIds: [account?.roleId] } });
+  check('按 roleIds 查询能查到刚加的账号',
+    mine.status === 200 && mine.json?.data?.accounts?.[0]?.roleId === account?.roleId);
+
+  const claimed = await call('/api/accounts', {
+    method: 'POST',
+    body: { nickname, region, lastWeekLikes: 1 },
+  });
+  check('同一角色再加一次 = 认领（200 claimed，不重复入库）',
+    claimed.status === 200 && claimed.json?.data?.claimed === true);
+
+  const refreshed = await call('/api/accounts/refresh', {
+    method: 'POST',
+    body: { roleIds: [account?.roleId, '9999999999'] },
+  });
+  check('POST /api/accounts/refresh（只刷给的那批）',
+    refreshed.status === 200 && refreshed.json?.data?.total === 1,
+    refreshed.json?.data?.errors?.[0]?.error?.message ?? `本周已刷=${refreshed.json?.data?.accounts?.[0]?.weekLikes}`);
+  check('不存在的 roleId 会落到 missing 里',
+    (refreshed.json?.data?.missing ?? []).includes('9999999999'));
+
+  const fixed = await call(`/api/accounts/${account?.roleId}`, {
+    method: 'PATCH',
+    body: { lastWeekLikes: refreshed.json?.data?.accounts?.[0]?.currentLikes ?? 0 },
+  });
+  check('PATCH /api/accounts/:roleId（修正基线）',
+    fixed.status === 200 && fixed.json?.data?.account?.weekLikes === 0);
+
+  const publicDelete = await call(`/api/accounts/${account?.roleId}`, { method: 'DELETE' });
+  check('公开接口没有删除能力（404，只能管理员在后台删）', publicDelete.status === 404);
 }
 
-console.log('\n[5] 清理临时数据');
-if (tempUserId && adminCred) {
+console.log('\n[4] 清理临时数据');
+if (!createdRoleId) {
+  console.log('    本次没有创建任何账号，无需清理');
+} else if (adminCred) {
   const [adminUser, adminPass] = adminCred.split(':');
-  const login = await call('/api/auth/login', { method: 'POST', body: { username: adminUser, password: adminPass } });
+  const login = await call('/api/auth/login', {
+    method: 'POST',
+    body: { username: adminUser, password: adminPass },
+  });
   if (login.status === 200) {
-    const deleted = await call(`/api/admin/users/${tempUserId}`, {
+    const deleted = await call(`/api/admin/roles/${createdRoleId}`, {
       method: 'DELETE',
       token: login.json.data.token,
     });
-    check('已删除冒烟测试用的临时用户', deleted.status === 200 || deleted.status === 404,
-      `用户 #${tempUserId}`);
+    check('已从数据库删掉冒烟测试账号', deleted.status === 200 || deleted.status === 404, `roleId=${createdRoleId}`);
   } else {
     check('管理员登录成功（用于清理）', false, login.json?.error?.message);
   }
-} else if (tempUserId) {
-  console.log(`    临时用户 #${tempUserId} 保留着；想自动清理就加 --admin 管理员账号:密码`);
 } else {
-  console.log('    本次没有创建任何数据，无需清理');
+  console.log(`    临时账号 roleId=${createdRoleId} 留在库里了；`);
+  console.log('    想自动清掉就加 --admin 管理员账号:密码（主页的「删」只是从本机列表移除，不会删库）');
 }
 
 console.log(`\n结果：通过 ${passed} 项，失败 ${failed} 项\n`);

@@ -1,38 +1,38 @@
 /**
  * HTTP API 路由。约定：成功返回 { ok: true, data }，失败返回 { ok: false, error }。
  *
- * 本地模式（未登录即可用，不落库，账号存在浏览器里）：
- *   POST   /api/local/add                 昵称+大区 → roleId（接口A，顺带点赞数与档案）
- *   POST   /api/local/sync                刷新一批本地账号（接口B）
- *   POST   /api/local/baseline            修正本地账号的「上周点赞数」
+ * 账号模型：一个 roleId 全站只有一条记录、不绑定用户；
+ * 但「看哪些账号」由每台设备自己决定 —— 主页把本机添加过的 roleIds 发上来，
+ * 服务端只按这批 roleId 返回/刷新，**不会把全库列表下发**，所以别人看不到你的列表。
+ * 添加已存在的角色 = 认领进本机列表，并顺手把库里的昵称/档案同步成游戏里的当前值
+ * （玩家改名后用新昵称再添加一次就会自动更正），但不动基线/当前点赞。
  *
- * 认证：
+ *   GET    /api/config                    运行配置
+ *   GET    /api/health                    健康检查
+ *
+ *   POST   /api/accounts                  添加账号（已存在则认领 + 同步新昵称，无需登录）
+ *   POST   /api/accounts/query            按 roleIds 批量查询（无需登录）
+ *   POST   /api/accounts/refresh          按 roleIds 批量刷新（无需登录）
+ *   POST   /api/accounts/:roleId/refresh  刷新单个
+ *   PATCH  /api/accounts/:roleId          修正上周点赞数
+ *
+ * 认证（只有管理后台才需要身份）：
  *   POST   /api/auth/register             注册
  *   POST   /api/auth/login                登录
  *   POST   /api/auth/logout               退出登录
  *   GET    /api/auth/me                   当前身份
  *   POST   /api/auth/password             修改自己的密码
  *
- * 用户自己的数据（需登录态）：
- *   GET    /api/accounts                  账号列表（只返回自己的）
- *   POST   /api/accounts                  添加账号
- *   POST   /api/accounts/import           注册后把本地账号搬上云
- *   POST   /api/accounts/refresh          刷新全部
- *   POST   /api/accounts/:roleId/refresh  刷新单个
- *   PATCH  /api/accounts/:roleId          修正上周点赞数
- *   DELETE /api/accounts/:roleId          删除
- *
  * 管理员（需 is_admin）：
  *   GET    /api/admin/overview
- *   GET    /api/admin/users                GET /api/admin/users/:id
+ *   GET    /api/admin/users
  *   PATCH  /api/admin/users/:id            设为/取消管理员
  *   POST   /api/admin/users/:id/password   重置该用户密码
  *   DELETE /api/admin/users/:id
- *   GET    /api/admin/roles
+ *   GET    /api/admin/roles                全站账号列表（唯一能看到全部的地方）
  *   PATCH  /api/admin/roles/:roleId        改名 / 改大区 / 改基线 / 改当前点赞
  *   POST   /api/admin/roles/:roleId/role-id 改 roleId（主键）
- *   POST   /api/admin/roles/:roleId/owner   改归属
- *   DELETE /api/admin/roles/:roleId
+ *   DELETE /api/admin/roles/:roleId        真正从数据库删除（公开接口没有删除能力）
  *   GET    /api/admin/audit-logs
  *   GET    /api/admin/settings             后台设置（目前只有首页公告）
  *   PATCH  /api/admin/settings             改首页公告
@@ -49,7 +49,18 @@ function bearerToken(request) {
   return null;
 }
 
-export function createApiHandler({ service, admin, auth, local }) {
+/**
+ * 读账号的接口都必须显式给 roleIds（本机列表），否则一律 400。
+ * 这样「谁都能添加」不等于「谁都能把全库列表拉走」。
+ */
+function requireRoleIdList(value) {
+  if (!Array.isArray(value)) {
+    throw new HttpError(400, 'INVALID_ROLE_IDS', 'roleIds 必须是数组（本机添加过的 roleId 列表）');
+  }
+  return value;
+}
+
+export function createApiHandler({ service, admin, auth }) {
   return async function handleApi(request, response, url) {
     const { pathname } = url;
     const method = (request.method ?? 'GET').toUpperCase();
@@ -59,9 +70,7 @@ export function createApiHandler({ service, admin, auth, local }) {
     const currentUser = resolved?.user ?? null;
 
     const requireUser = () => {
-      if (!currentUser) {
-        throw new HttpError(401, 'UNAUTHORIZED', '请先登录（游客身份也需要先获取一个身份）');
-      }
+      if (!currentUser) throw new HttpError(401, 'UNAUTHORIZED', '请先登录');
       return currentUser;
     };
 
@@ -70,6 +79,9 @@ export function createApiHandler({ service, admin, auth, local }) {
       if (!user.isAdmin) throw new HttpError(403, 'FORBIDDEN', '需要管理员权限');
       return user;
     };
+
+    /** 审计日志里的操作者：登录了就是 user:<id>，没登录就是 guest（后台显示成「游客」） */
+    const actorOf = () => (currentUser ? `user:${currentUser.id}` : 'guest');
 
     const userAgent = String(request.headers['user-agent'] ?? '').slice(0, 200) || null;
 
@@ -94,50 +106,6 @@ export function createApiHandler({ service, admin, auth, local }) {
 
       if (pathname === '/api/config' && method === 'GET') {
         sendJson(response, 200, { ok: true, data: service.getRuntimeInfo() });
-        return true;
-      }
-
-      /* ------------------------------------------------------- 本地模式（不落库） */
-
-      if (pathname.startsWith('/api/local/')) {
-        if (!local.enabled) {
-          throw new HttpError(403, 'LOCAL_MODE_DISABLED', '本地模式已被服务端关闭，请先注册账号');
-        }
-        if (pathname === '/api/local/add' && method === 'POST') {
-          const body = await readJsonBody(request);
-          const result = await local.add({
-            nickname: body.nickname,
-            region: body.region,
-            lastWeekLikes: body.lastWeekLikes,
-          });
-          sendJson(response, 201, { ok: true, data: result });
-          return true;
-        }
-        if (pathname === '/api/local/sync' && method === 'POST') {
-          const body = await readJsonBody(request);
-          const result = await local.sync({ accounts: body.accounts });
-          sendJson(response, 200, { ok: true, data: result });
-          return true;
-        }
-        if (pathname === '/api/local/baseline' && method === 'POST') {
-          const body = await readJsonBody(request);
-          const result = await local.setBaseline({
-            account: body.account,
-            lastWeekLikes: body.lastWeekLikes,
-          });
-          sendJson(response, 200, { ok: true, data: result });
-          return true;
-        }
-        if (pathname === '/api/local/settle' && method === 'POST') {
-          const body = await readJsonBody(request);
-          const result = await local.settleOnly({ accounts: body.accounts });
-          sendJson(response, 200, { ok: true, data: result });
-          return true;
-        }
-        sendJson(response, 404, {
-          ok: false,
-          error: { code: 'NOT_FOUND', message: `没有这个本地接口：${method} ${pathname}` },
-        });
         return true;
       }
 
@@ -186,7 +154,7 @@ export function createApiHandler({ service, admin, auth, local }) {
             user: currentUser,
             loggedIn: Boolean(currentUser),
             isAdmin: currentUser ? currentUser.isAdmin : false,
-            roleCount: currentUser ? service.repo.roles.listRolesByUser(currentUser.id).length : 0,
+            roleCount: service.repo.roles.countRoles(),
           },
         });
         return true;
@@ -201,71 +169,58 @@ export function createApiHandler({ service, admin, auth, local }) {
       }
 
       /* ----------------------------------------------------------- 账号管理 */
-
-      if (pathname === '/api/accounts' && method === 'GET') {
-        const user = requireUser();
-        const accounts = await service.listAccounts(user.id);
-        sendJson(response, 200, {
-          ok: true,
-          data: { accounts, ...service.getRuntimeInfo(), user },
-        });
-        return true;
-      }
+      /* 全站唯一 + 本机视图：服务端只按客户端给的 roleIds 返回，绝不主动下发全库列表 */
 
       if (pathname === '/api/accounts' && method === 'POST') {
-        const user = requireUser();
         const body = await readJsonBody(request);
-        const result = await service.addAccount(user.id, {
-          nickname: body.nickname,
-          region: body.region,
-          lastWeekLikes: body.lastWeekLikes,
-        });
-        sendJson(response, 201, { ok: true, data: result });
+        const result = await service.addAccount(
+          {
+            nickname: body.nickname,
+            region: body.region,
+            lastWeekLikes: body.lastWeekLikes,
+          },
+          { actor: actorOf() },
+        );
+        sendJson(response, result.claimed ? 200 : 201, { ok: true, data: result });
         return true;
       }
 
-      if (pathname === '/api/accounts/import' && method === 'POST') {
-        const user = requireUser();
+      if (pathname === '/api/accounts/query' && method === 'POST') {
         const body = await readJsonBody(request);
-        const result = await service.importLocalAccounts(user.id, body.accounts);
+        requireRoleIdList(body.roleIds);
+        const result = await service.queryAccounts(body.roleIds);
         sendJson(response, 200, { ok: true, data: result });
         return true;
       }
 
       if (pathname === '/api/accounts/refresh' && method === 'POST') {
-        const user = requireUser();
-        const result = await service.refreshAll(user.id);
+        const body = await readJsonBody(request);
+        requireRoleIdList(body.roleIds);
+        const result = await service.refreshAccounts(body.roleIds);
         sendJson(response, 200, { ok: true, data: result });
         return true;
       }
 
       const refreshMatch = /^\/api\/accounts\/([^/]+)\/refresh$/.exec(pathname);
       if (refreshMatch && method === 'POST') {
-        const user = requireUser();
-        const result = await service.refreshAccount(user.id, decodeURIComponent(refreshMatch[1]));
+        const result = await service.refreshAccount(decodeURIComponent(refreshMatch[1]));
         sendJson(response, 200, { ok: true, data: result });
         return true;
       }
 
       const accountMatch = /^\/api\/accounts\/([^/]+)$/.exec(pathname);
       if (accountMatch && method === 'PATCH') {
-        const user = requireUser();
         const body = await readJsonBody(request);
         const result = await service.updateAccountBaseline(
-          user.id,
           decodeURIComponent(accountMatch[1]),
           body.lastWeekLikes,
+          { actor: actorOf() },
         );
         sendJson(response, 200, { ok: true, data: result });
         return true;
       }
-
-      if (accountMatch && method === 'DELETE') {
-        const user = requireUser();
-        const result = await service.removeAccount(user.id, decodeURIComponent(accountMatch[1]));
-        sendJson(response, 200, { ok: true, data: result });
-        return true;
-      }
+      // 公开接口没有 DELETE：主页的「删」只是把这台设备的列表移除，
+      // 真正从数据库删账号只能由管理员在后台做（/api/admin/roles/:roleId）
 
       /* ------------------------------------------------------------ 管理端 */
 
@@ -291,10 +246,6 @@ export function createApiHandler({ service, admin, auth, local }) {
         }
 
         const userMatch = /^\/api\/admin\/users\/(\d+)$/.exec(pathname);
-        if (userMatch && method === 'GET') {
-          sendJson(response, 200, { ok: true, data: admin.getUserDetail(Number(userMatch[1])) });
-          return true;
-        }
         if (userMatch && method === 'PATCH') {
           const body = await readJsonBody(request);
           if (body.isSuper !== undefined) {
@@ -318,9 +269,7 @@ export function createApiHandler({ service, admin, auth, local }) {
         }
 
         if (pathname === '/api/admin/roles' && method === 'GET') {
-          const roles = admin.listRoles({
-            userId: url.searchParams.get('userId') ? Number(url.searchParams.get('userId')) : null,
-          });
+          const roles = admin.listRoles();
           sendJson(response, 200, { ok: true, data: { roles } });
           return true;
         }
@@ -332,18 +281,6 @@ export function createApiHandler({ service, admin, auth, local }) {
             actor,
             decodeURIComponent(roleIdChangeMatch[1]),
             body.roleId,
-          );
-          sendJson(response, 200, { ok: true, data: result });
-          return true;
-        }
-
-        const roleOwnerMatch = /^\/api\/admin\/roles\/([^/]+)\/owner$/.exec(pathname);
-        if (roleOwnerMatch && method === 'POST') {
-          const body = await readJsonBody(request);
-          const result = admin.transferRole(
-            actor,
-            decodeURIComponent(roleOwnerMatch[1]),
-            body.userId,
           );
           sendJson(response, 200, { ok: true, data: result });
           return true;

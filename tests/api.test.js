@@ -1,7 +1,7 @@
 /**
- * 端到端接口测试（注册用户 / 云端版）：
- * 注册 → 添加账号（入云端数据库）→ 跨设备登录同步 → 用户之间互相隔离 →
- * 注册后把本地模式攒的账号搬上云 → 每周结算（只推进基线，不再有点赞记录表）。
+ * 端到端接口测试：
+ * 账号全站唯一、不绑用户；「看哪些」由每台设备给出的 roleIds 决定（未登录也能用）；
+ * 用户体系只管登录 / 管理后台 → 每周结算（只推进基线，不再有点赞记录表）。
  */
 
 import assert from 'node:assert/strict';
@@ -93,7 +93,7 @@ test('健康检查与运行配置', async () => {
   const config = await call('/api/config');
   assert.equal(config.json.data.weeklyCap, 350);
   assert.equal(config.json.data.timeZone, TZ);
-  assert.equal(config.json.data.allowLocalMode, true);
+  assert.equal(config.json.data.allowLocalMode, undefined, '本地模式已经整体移除');
   assert.ok(config.json.data.week.startMs < config.json.data.week.endMs);
 });
 
@@ -133,13 +133,26 @@ test('静态资源与目录穿越防护', async () => {
   assert.ok(!rawResponse.includes('loadConfig'), '不能读到 shared 目录之外的文件');
 });
 
-test('没有 token 时访问账号接口返回 401，且不再有游客接口', async () => {
-  const res = await call('/api/accounts');
-  assert.equal(res.status, 401);
-  assert.equal(res.json.error.code, 'UNAUTHORIZED');
+test('账号接口不需要登录，但必须给 roleIds（不给就看不到任何人的列表）', async () => {
+  const legacyList = await call('/api/accounts');
+  assert.equal(legacyList.status, 404, '旧的「列出全部」接口已经移除');
+
+  const empty = await call('/api/accounts/query', { method: 'POST', body: { roleIds: [] } });
+  assert.equal(empty.status, 200);
+  assert.deepEqual(empty.json.data.accounts, []);
+
+  const noIds = await call('/api/accounts/query', { method: 'POST', body: {} });
+  assert.equal(noIds.status, 400);
+  assert.equal(noIds.json.error.code, 'INVALID_ROLE_IDS');
 
   const guest = await call('/api/auth/guest', { method: 'POST' });
   assert.equal(guest.status, 404, '游客接口已经移除');
+
+  const legacyLocal = await call('/api/local/settle', { method: 'POST', body: { accounts: [] } });
+  assert.equal(legacyLocal.status, 404, '本地模式接口已经移除');
+
+  const guarded = await call('/api/admin/overview');
+  assert.equal(guarded.status, 401, '管理接口仍然要管理员身份');
 });
 
 test('未登录时 /api/auth/me 返回 user: null', async () => {
@@ -185,10 +198,9 @@ test('注册 / 登录 / 重复注册 / 空账号密码', async () => {
   assert.equal(wrong.json.error.code, 'BAD_CREDENTIALS');
 });
 
-test('登录用户添加账号：入云端数据库，字段完整', async () => {
+test('游客（未登录）添加账号：入数据库，字段完整', async () => {
   const created = await call('/api/accounts', {
     method: 'POST',
-    token: state.owner.token,
     body: { nickname: '云端玩家甲', region: 'wechat', lastWeekLikes: 1000 },
   });
   assert.equal(created.status, 201, JSON.stringify(created.json));
@@ -207,70 +219,76 @@ test('登录用户添加账号：入云端数据库，字段完整', async () =>
   assert.equal(account.weekLikes, Math.max(0, account.currentLikes - 1000));
 
   state.roleId = account.roleId;
-  assert.ok(app.repo.roles.getRole(account.roleId), '登录用户的账号要真的落库');
+  assert.ok(app.repo.roles.getRole(account.roleId), '游客添加的账号要真的落库');
 });
 
-test('同一用户重复添加同一个角色会被拒绝', async () => {
+test('同一个角色全站只有一条：重复添加变成「认领」，不重复入库', async () => {
+  const before = app.repo.roles.countRoles();
   const again = await call('/api/accounts', {
     method: 'POST',
-    token: state.owner.token,
     body: { nickname: '云端玩家甲', region: 'wechat', lastWeekLikes: 1000 },
   });
-  assert.equal(again.status, 409);
-  assert.equal(again.json.error.code, 'DUPLICATE_ACCOUNT');
-  assert.equal(again.json.error.details.mine, true);
+  assert.equal(again.status, 200, JSON.stringify(again.json));
+  assert.equal(again.json.data.claimed, true);
+  assert.equal(again.json.data.account.roleId, state.roleId);
+  assert.equal(app.repo.roles.countRoles(), before, '不能重复入库');
 });
 
-test('用户之间互相隔离', async () => {
+test('本机视图：别人（含未登录）不会拿到你的列表，给了 roleId 才看得到', async () => {
   const stranger = await newUser('stranger');
 
-  const list = await call('/api/accounts', { token: stranger.token });
-  assert.equal(list.json.data.accounts.length, 0);
-
-  for (const [method, path, body] of [
-    ['POST', `/api/accounts/${state.roleId}/refresh`, undefined],
-    ['PATCH', `/api/accounts/${state.roleId}`, { lastWeekLikes: 1 }],
-    ['DELETE', `/api/accounts/${state.roleId}`, undefined],
-  ]) {
-    const res = await call(path, { method, token: stranger.token, body });
-    assert.equal(res.status, 404, `${method} ${path} 应该看不到别人的账号`);
-  }
-
-  const duplicate = await call('/api/accounts', {
+  const mine = await call('/api/accounts/query', {
     method: 'POST',
     token: stranger.token,
-    body: { nickname: '云端玩家甲', region: 'wechat', lastWeekLikes: 10 },
+    body: { roleIds: [state.roleId] },
   });
-  assert.equal(duplicate.status, 409);
-  assert.equal(duplicate.json.error.details.mine, false);
-  assert.equal(duplicate.json.error.details.existing, null, '不能把别人的账号信息泄露出去');
+  assert.equal(mine.json.data.accounts.length, 1, '知道 roleId 就能看这一条');
+
+  const anonymous = await call('/api/accounts/query', {
+    method: 'POST',
+    body: { roleIds: ['1111111111'] },
+  });
+  assert.deepEqual(anonymous.json.data.accounts, []);
+  assert.deepEqual(anonymous.json.data.missing, ['1111111111']);
+
+  const refreshed = await call('/api/accounts/refresh', {
+    method: 'POST',
+    token: stranger.token,
+    body: { roleIds: [state.roleId] },
+  });
+  assert.equal(refreshed.status, 200);
+  assert.equal(refreshed.json.data.total, 1);
 });
 
-test('跨设备登录：换一个身份登录后能看到同样的账号（云端同步）', async () => {
+test('登录状态不影响账号数据（登录前后是同一份）', async () => {
   const login = await call('/api/auth/login', {
     method: 'POST',
     body: { username: state.owner.username, password: 'pw123456' },
   });
-  const list = await call('/api/accounts', { token: login.json.data.token });
+  const list = await call('/api/accounts/query', {
+    method: 'POST',
+    token: login.json.data.token,
+    body: { roleIds: [state.roleId] },
+  });
   assert.equal(list.json.data.accounts.length, 1);
   assert.equal(list.json.data.accounts[0].roleId, state.roleId);
   state.ownerSecondToken = login.json.data.token;
 });
 
-test('刷新 / 改基线 / 删除', async () => {
-  const { token } = state.owner;
-
-  const one = await call(`/api/accounts/${state.roleId}/refresh`, { method: 'POST', token });
+test('刷新 / 改基线', async () => {
+  const one = await call(`/api/accounts/${state.roleId}/refresh`, { method: 'POST' });
   assert.equal(one.status, 200);
   assert.equal(one.json.data.warning, null);
 
-  const all = await call('/api/accounts/refresh', { method: 'POST', token });
+  const all = await call('/api/accounts/refresh', {
+    method: 'POST',
+    body: { roleIds: [state.roleId] },
+  });
   assert.equal(all.json.data.total, 1);
   assert.equal(all.json.data.failed, 0);
 
   const fixed = await call(`/api/accounts/${state.roleId}`, {
     method: 'PATCH',
-    token,
     body: { lastWeekLikes: 0 },
   });
   assert.equal(fixed.status, 200);
@@ -279,57 +297,12 @@ test('刷新 / 改基线 / 删除', async () => {
 
   const invalid = await call(`/api/accounts/${state.roleId}`, {
     method: 'PATCH',
-    token,
     body: { lastWeekLikes: -1 },
   });
   assert.equal(invalid.status, 400);
 });
 
-test('注册后把本地模式的账号搬上云（/api/accounts/import）', async () => {
-  // 先以“未登录”身份在本地模式加两个账号
-  const localA = await call('/api/local/add', {
-    method: 'POST',
-    body: { nickname: '本地搬云端甲', region: 'qq', lastWeekLikes: 800 },
-  });
-  const localB = await call('/api/local/add', {
-    method: 'POST',
-    body: { nickname: '本地搬云端乙', region: 'wechat', lastWeekLikes: 300 },
-  });
-  assert.equal(localA.status, 201);
-  assert.equal(localB.status, 201);
-
-  const locals = [localA.json.data.account, localB.json.data.account];
-  const before = app.repo.roles.countRoles();
-
-  const fresh = await newUser('mover');
-  const imported = await call('/api/accounts/import', {
-    method: 'POST',
-    token: fresh.token,
-    body: { accounts: locals },
-  });
-  assert.equal(imported.status, 200, JSON.stringify(imported.json));
-  assert.equal(imported.json.data.imported, 2);
-  assert.equal(imported.json.data.skipped, 0);
-  assert.equal(app.repo.roles.countRoles(), before + 2);
-
-  const list = await call('/api/accounts', { token: fresh.token });
-  assert.equal(list.json.data.accounts.length, 2);
-  // 基线要原样保留，而不是被重置
-  const moved = list.json.data.accounts.find((item) => item.nickname === '本地搬云端甲');
-  assert.equal(moved.baseline, 800);
-
-  // 再导一次：已经在库里了，应该跳过而不是报错
-  const again = await call('/api/accounts/import', {
-    method: 'POST',
-    token: fresh.token,
-    body: { accounts: locals },
-  });
-  assert.equal(again.json.data.imported, 0);
-  assert.equal(again.json.data.skipped, 2);
-  assert.equal(again.json.data.skippedDetail[0].reason, 'ALREADY_EXISTS');
-});
-
-test('退出登录后原 token 失效', async () => {
+test('退出登录后原 token 失效（但账号数据不受影响）', async () => {
   const user = await newUser('bye');
   const out = await call('/api/auth/logout', { method: 'POST', token: user.token });
   assert.equal(out.status, 200);
@@ -337,8 +310,19 @@ test('退出登录后原 token 失效', async () => {
   const me = await call('/api/auth/me', { token: user.token });
   assert.equal(me.json.data.user, null);
 
-  const list = await call('/api/accounts', { token: user.token });
-  assert.equal(list.status, 401);
+  const password = await call('/api/auth/password', {
+    method: 'POST',
+    token: user.token,
+    body: { oldPassword: 'pw123456', newPassword: 'pw654321' },
+  });
+  assert.equal(password.status, 401, '失效的 token 不能再改密码');
+
+  const list = await call('/api/accounts/query', {
+    method: 'POST',
+    token: user.token,
+    body: { roleIds: [state.roleId] },
+  });
+  assert.equal(list.status, 200, '账号接口本来就公开，和登录态无关');
 });
 
 test('每周结算：周一 00:00:01 触发后基线推进、来源是 cron、不再有点赞记录表', async () => {
@@ -378,6 +362,6 @@ test('数据落库：重新打开同一个数据库数据还在', async () => {
   const repo = createRepo(db);
   const role = repo.roles.getRole(state.roleId);
   assert.ok(role, '重新打开数据库应该还能读到角色');
-  assert.equal(role.userId, state.owner.user.id);
+  assert.equal(role.userId, undefined, '角色已经不绑定任何用户');
   db.close();
 });

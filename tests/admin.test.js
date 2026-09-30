@@ -1,7 +1,7 @@
 /**
  * 管理员后台接口测试：
- * 权限校验、用户管理、游戏账号（roleId / 基线 / 改归属 / 改当前点赞）管理。
- * 注：点赞记录表已按需求移除，相关用例一并删除。
+ * 权限校验、用户管理、全站共享的游戏账号（roleId / 基线 / 添加者 / 改当前点赞）管理。
+ * 注：账号已经不绑定用户，所以「改归属」相关用例一并删除。
  */
 
 import assert from 'node:assert/strict';
@@ -37,10 +37,10 @@ async function call(pathname, { method = 'GET', body, token } = {}) {
 }
 
 let seq = 0;
-const newGuest = async () => {
-  // 新版没有游客身份了，这里直接用注册用户代替（函数名沿用，减少改动）
+/** 注册一个全新用户，返回 { token, user, username }（用户只用于登录后台） */
+const newUser = async (prefix = 'player') => {
   seq += 1;
-  const username = `player${Date.now().toString().slice(-5)}${seq}`;
+  const username = `${prefix}${Date.now().toString().slice(-5)}${seq}`;
   const res = await call('/api/auth/register', {
     method: 'POST',
     body: { username, password: 'pw123456' },
@@ -77,21 +77,17 @@ before(async () => {
   state.adminToken = admin.json.data.token;
   state.adminUser = admin.json.data.user;
 
-  // 普通用户 + 一个游戏账号
-  const guest = await newGuest();
-  const registered = await call('/api/auth/register', {
-    method: 'POST',
-    token: guest.token,
-    body: { username: 'player1', password: 'pw1' },
-  });
-  state.playerToken = registered.json.data.token;
-  state.playerUser = registered.json.data.user;
+  // 普通用户（player1）+ 一个游戏账号（账号是全站共享的，不绑这个用户）
+  const player = await newUser();
+  state.playerToken = player.token;
+  state.playerUser = player.user;
+  state.playerUsername = player.username;
 
   const created = await call('/api/accounts', {
     method: 'POST',
-    token: state.playerToken,
     body: { nickname: '后台测试角色', region: 'wechat', lastWeekLikes: 2000 },
   });
+  assert.equal(created.status, 201, JSON.stringify(created.json));
   state.roleId = created.json.data.account.roleId;
 });
 
@@ -152,7 +148,7 @@ test('数据库层挡住第二个超级管理员', async () => {
 });
 
 test('普通管理员：能管游戏账号，但动不了管理员层级', async () => {
-  // 让 rootadmin 把 player1 提为普通管理员
+  // 让 rootadmin 把普通用户提为普通管理员
   const promote = await call(`/api/admin/users/${state.playerUser.id}`, {
     method: 'PATCH',
     token: state.adminToken,
@@ -164,7 +160,7 @@ test('普通管理员：能管游戏账号，但动不了管理员层级', async
 
   const playerLogin = await call('/api/auth/login', {
     method: 'POST',
-    body: { username: 'player1', password: 'pw1' },
+    body: { username: state.playerUsername, password: 'pw123456' },
   });
   const playerToken = playerLogin.json.data.token;
 
@@ -205,7 +201,7 @@ test('普通管理员：能管游戏账号，但动不了管理员层级', async
   assert.equal(selfPromote.status, 403);
   assert.equal(selfPromote.json.error.code, 'SUPER_ONLY');
 
-  // 收尾：把 player1 降回普通用户，免得影响后面的用例
+  // 收尾：把普通用户降回普通用户，免得影响后面的用例
   await call(`/api/admin/users/${state.playerUser.id}`, {
     method: 'PATCH',
     token: state.adminToken,
@@ -215,7 +211,7 @@ test('普通管理员：能管游戏账号，但动不了管理员层级', async
 
 test('普通用户 / 未登录访问管理接口会被拒', async () => {
   // 用一个全新的普通用户，避免受别处「提升为管理员」的影响
-  const plainUser = await newGuest();
+  const plainUser = await newUser('plain');
   const byUser = await call('/api/admin/users', { token: plainUser.token });
   assert.equal(byUser.status, 403);
   assert.equal(byUser.json.error.code, 'FORBIDDEN');
@@ -234,32 +230,23 @@ test('后台概览：统计 + 当前周 + 上次结算标记', async () => {
   assert.equal(data.defaultAdminPassword, false, '用的是 .env 里配的密码，不该报默认密码');
 });
 
-test('用户列表：带角色数、本周已刷合计', async () => {
+test('用户列表：带会话数（用户和游戏账号已经互不相干）', async () => {
   const res = await call('/api/admin/users', { token: state.adminToken });
   assert.equal(res.status, 200);
-  const player = res.json.data.users.find((user) => user.username === 'player1');
+  const player = res.json.data.users.find((user) => user.id === state.playerUser.id);
   assert.ok(player);
-  assert.equal(player.roleCount, 1);
-  assert.ok(player.weekLikesTotal >= 0);
-  assert.equal(player.isGuest, false);
-
-  assert.ok(res.json.data.users.every((user) => user.isGuest === false), '不再有游客身份');
+  assert.equal(player.username, state.playerUsername);
+  assert.equal(typeof player.sessionCount, 'number');
+  assert.equal(player.roleCount, undefined, '用户不再统计名下账号');
 });
 
-test('用户详情：他的游戏账号', async () => {
-  const res = await call(`/api/admin/users/${state.playerUser.id}`, { token: state.adminToken });
-  assert.equal(res.status, 200);
-  assert.equal(res.json.data.accounts.length, 1);
-  assert.equal(res.json.data.accounts[0].roleId, state.roleId);
-});
-
-test('游戏账号列表：带归属人', async () => {
+test('游戏账号列表：全站共享，标出是谁添加的', async () => {
   const res = await call('/api/admin/roles', { token: state.adminToken });
   assert.equal(res.status, 200);
   const role = res.json.data.roles.find((item) => item.roleId === state.roleId);
   assert.ok(role);
-  assert.equal(role.ownerLabel, 'player1');
-  assert.equal(role.userId, state.playerUser.id);
+  assert.equal(role.addedBy, '游客（未登录）', '这个账号是未登录时添加的');
+  assert.equal(role.userId, undefined, '账号不再有归属用户字段');
 });
 
 test('管理员可以改昵称 / 大区 / 上周点赞（基线）', async () => {
@@ -308,31 +295,26 @@ test('管理员可以改 roleId（主键）', async () => {
   state.roleId = newRoleId;
 });
 
-test('管理员可以把 roleId 改归属给另一个用户', async () => {
-  const other = await newGuest();
-  const registered = await call('/api/auth/register', {
-    method: 'POST',
-    token: other.token,
-    body: { username: 'player2', password: 'pw2' },
-  });
-  const targetUserId = registered.json.data.user.id;
+test('注册第二个用户（后面几个用例要用），账号不再有改归属接口', async () => {
+  const player2 = await newUser('player2');
+  state.player2 = { token: player2.token, user: player2.user, username: player2.username };
 
-  const res = await call(`/api/admin/roles/${state.roleId}/owner`, {
+  // 「改归属」整条链路都已经移除：接口不存在
+  const transfer = await call(`/api/admin/roles/${state.roleId}/owner`, {
     method: 'POST',
     token: state.adminToken,
-    body: { userId: targetUserId },
+    body: { userId: state.player2.user.id },
   });
-  assert.equal(res.status, 200, JSON.stringify(res.json));
-  assert.equal(app.repo.roles.getRole(state.roleId).userId, targetUserId);
+  assert.equal(transfer.status, 404, '账号不绑用户，改归属接口应该已经删掉');
 
-  // 现在 player1 看不到了，player2 能看到
-  const original = await call('/api/accounts', { token: state.playerToken });
-  assert.equal(original.json.data.accounts.length, 0);
-  const moved = await call('/api/accounts', { token: registered.json.data.token });
-  assert.equal(moved.json.data.accounts.length, 1);
-  assert.equal(moved.json.data.accounts[0].roleId, state.roleId);
-
-  state.player2 = { token: registered.json.data.token, user: registered.json.data.user };
+  // 账号是全站唯一的，但「看哪些」由客户端给 roleIds 决定：知道 roleId 就能看到这一条
+  const list = await call('/api/accounts/query', {
+    method: 'POST',
+    token: state.player2.token,
+    body: { roleIds: [state.roleId] },
+  });
+  assert.equal(list.json.data.accounts.length, 1);
+  assert.equal(list.json.data.accounts[0].roleId, state.roleId);
 });
 
 test('超级管理员不能取消自己的管理员权限，也不能删自己', async () => {
@@ -375,7 +357,7 @@ test('把普通用户提升为管理员后，他能访问后台', async () => {
 
 test('重置用户密码后，该用户原来的登录态会被踢掉', async () => {
   const before = await call('/api/auth/me', { token: state.player2.token });
-  assert.equal(before.json.data.user.username, 'player2');
+  assert.equal(before.json.data.user.username, state.player2.username);
 
   const reset = await call(`/api/admin/users/${state.player2.user.id}/password`, {
     method: 'POST',
@@ -389,7 +371,7 @@ test('重置用户密码后，该用户原来的登录态会被踢掉', async ()
 
   const relogin = await call('/api/auth/login', {
     method: 'POST',
-    body: { username: 'player2', password: 'newpw456' },
+    body: { username: state.player2.username, password: 'newpw456' },
   });
   assert.equal(relogin.status, 200, '新密码能登录');
   state.player2.token = relogin.json.data.token;
@@ -409,38 +391,29 @@ test('删除 roleId', async () => {
   assert.equal(again.status, 404);
 });
 
-test('删除用户会连带删掉他的游戏账号', async () => {
-  // 给 player2 再建一个账号
+test('删除用户不会连累游戏账号（账号已经不绑用户）', async () => {
   const created = await call('/api/accounts', {
     method: 'POST',
-    token: state.player2.token,
-    body: { nickname: '待删除角色', region: 'wechat', lastWeekLikes: 50 },
+    body: { nickname: '删用户也不删的角色', region: 'wechat', lastWeekLikes: 50 },
   });
   assert.equal(created.status, 201);
   const roleId = created.json.data.account.roleId;
-
-  const userDetail = await call(`/api/admin/users/${state.player2.user.id}`, {
-    token: state.adminToken,
-  });
-  const rolesBefore = userDetail.json.data.accounts.length;
-  assert.equal(rolesBefore, 1);
 
   const res = await call(`/api/admin/users/${state.player2.user.id}`, {
     method: 'DELETE',
     token: state.adminToken,
   });
   assert.equal(res.status, 200, JSON.stringify(res.json));
-  assert.equal(res.json.data.roleCount, 1);
 
   assert.equal(app.repo.users.getUser(state.player2.user.id), null);
-  assert.equal(app.repo.roles.getRole(roleId), null, '角色应该被级联删除');
+  assert.ok(app.repo.roles.getRole(roleId), '游戏账号必须留着');
 
   // 会话也应该失效（外键级联）
   const me = await call('/api/auth/me', { token: state.player2.token });
   assert.equal(me.json.data.user, null);
 });
 
-test('操作日志：管理员的改动都留了痕', async () => {
+test('操作日志：改动都留了痕', async () => {
   const res = await call('/api/admin/audit-logs?limit=100', { token: state.adminToken });
   assert.equal(res.status, 200);
   const actions = res.json.data.records.map((item) => item.action);
@@ -450,12 +423,12 @@ test('操作日志：管理员的改动都留了痕', async () => {
     'role.add',
     'admin.role.update',
     'admin.role.change-id',
-    'admin.role.transfer',
     'admin.role.delete',
     'admin.user.delete',
   ]) {
     assert.ok(actions.includes(expected), `审计日志里应该有 ${expected}`);
   }
+  assert.ok(!actions.includes('admin.role.transfer'), '改归属已经不存在了');
   assert.ok(res.json.data.records.every((item) => item.actor && item.createdAt));
 });
 

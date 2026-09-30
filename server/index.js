@@ -11,24 +11,18 @@ import { pathToFileURL } from 'node:url';
 import { createAdapters } from './lib/adapters/index.js';
 import { createAdminService } from './lib/admin.js';
 import { createApiHandler } from './api.js';
-import { createAuthService, ensureAdmin, hashPassword } from './lib/auth.js';
+import { createAuthService, ensureAdmin } from './lib/auth.js';
 import { loadConfig, loadEnvFile } from './lib/config.js';
 import { closeDatabase, openDatabase } from './lib/db.js';
 import { serveStatic } from './lib/http-utils.js';
 import { startScheduler } from './lib/jobs/weekly.js';
 import { importLegacyJson } from './lib/legacy-import.js';
-import { createLocalService } from './lib/local.js';
 import { createRepo } from './lib/repo.js';
 import { createService } from './lib/service.js';
-import { randomBytes } from 'node:crypto';
 
 /** 旧版（JSON 文件）数据还在的话，启动时导入到数据库，避免用户数据丢失 */
 function importLegacyIfNeeded({ repo, config }) {
-  return importLegacyJson({
-    repo,
-    config,
-    randomPassword: () => hashPassword(randomBytes(24).toString('base64url')),
-  });
+  return importLegacyJson({ repo, config });
 }
 
 export async function createApp({ env = loadEnvFile() } = {}) {
@@ -40,12 +34,11 @@ export async function createApp({ env = loadEnvFile() } = {}) {
   const auth = createAuthService({ repo, config });
   const service = createService({ config, repo, adapters, auth });
   const admin = createAdminService({ config, repo, auth, adapters });
-  const local = createLocalService({ config, adapters });
 
   const legacy = importLegacyIfNeeded({ repo, config });
   const adminInfo = ensureAdmin({ repo, config });
 
-  const handleApi = createApiHandler({ service, admin, auth, local });
+  const handleApi = createApiHandler({ service, admin, auth });
 
   const mounts = [
     { prefix: '/shared/', dir: config.sharedDir },
@@ -87,7 +80,7 @@ export async function createApp({ env = loadEnvFile() } = {}) {
 
   const scheduler = startScheduler({ service, config, logger: console });
 
-  return { config, db, repo, adapters, auth, service, admin, local, adminInfo, legacy, server, scheduler };
+  return { config, db, repo, adapters, auth, service, admin, adminInfo, legacy, server, scheduler };
 }
 
 /** 列出局域网 IPv4 地址，方便直接用手机打开 */
@@ -134,7 +127,7 @@ if (isMain || process.env.START_SERVER === '1') {
     console.log(`  接口适配器：${config.adapter}${config.adapter !== config.requestedAdapter ? `（配置要求 ${config.requestedAdapter}，但真实接口地址未填，已回退 mock）` : ''}`);
     console.log(`  数据库：${config.dbFile}`);
     console.log(`  注册用户 ${repo.users.countUsers()} 个 / 游戏账号 ${repo.roles.countRoles()} 个`);
-    console.log(`  未登录（本地模式）：${config.allowLocalMode ? '开启，账号只存在访客浏览器里，不入库' : '关闭'}`);
+    console.log('  账号全站唯一（不绑用户）：主页只显示各自添加过的，管理后台能看到全部');
     console.log(`  管理员：${adminInfo.username ?? '（已有管理员）'}${adminInfo.defaultPassword ? '  ← 默认密码，请尽快修改' : ''}`);
     console.log(`  游戏周时区：${config.timeZone}（每周一 00:00:01 重置并结算）`);
     console.log(`  管理后台：http://${shown}:${config.port}/admin.html`);
