@@ -154,6 +154,8 @@ export function loadConfig(env = loadEnvFile()) {
     apiKeyHeader,
     settleGraceMs: num(env.SETTLE_GRACE_MS, 10 * 60 * 1000),
     autoRefreshMinutes: num(env.AUTO_REFRESH_MINUTES, 0),
+    // 本地模式（未登录时把游戏账号存在浏览器里）：不落库，只借用服务端代理调接口
+    allowLocalMode: str(env.ALLOW_LOCAL_MODE, '1') !== '0',
     // 管理员：配了就用配置的，没配且系统里一个管理员都没有时会建默认管理员并告警
     adminUsername: str(env.ADMIN_USERNAME, ''),
     adminPassword: str(env.ADMIN_PASSWORD, ''),

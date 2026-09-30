@@ -78,6 +78,15 @@ async function request(path, { method = 'GET', body, token } = {}) {
 
 export const getConfig = () => request('/api/config');
 
+/* --------------------------------------------------------------- 本地模式 */
+/* 未登录时游戏账号只存在浏览器里，这些接口不落库，只是借用服务端调一下接口 A/B */
+
+export const localAdd = (payload) => request('/api/local/add', { method: 'POST', body: payload });
+export const localSync = (accounts) => request('/api/local/sync', { method: 'POST', body: { accounts } });
+export const localSettle = (accounts) => request('/api/local/settle', { method: 'POST', body: { accounts } });
+export const localSetBaseline = (account, lastWeekLikes) =>
+  request('/api/local/baseline', { method: 'POST', body: { account, lastWeekLikes } });
+
 /* ------------------------------------------------------------------ 认证 */
 
 export const register = (username, password) =>
@@ -90,8 +99,8 @@ export const changeMyPassword = (oldPassword, newPassword) =>
   request('/api/auth/password', { method: 'POST', body: { oldPassword, newPassword } });
 
 /**
- * 读取当前身份。未登录时 user 为 null——这不影响使用：
- * 主页不需要登录就能添加/查看本机列表里的账号。
+ * 读取当前身份。未登录时 user 为 null（**不会**再自动创建游客）——
+ * 前端这时走本地模式，账号只存在这台浏览器里。
  */
 export async function loadIdentity() {
   try {
@@ -103,24 +112,22 @@ export async function loadIdentity() {
   }
 }
 
-/* ------------------------------------------------------------- 游戏账号 */
-/*
- * 一个 roleId 全站只有一条记录、不绑定用户；但「看哪些账号」是每台设备自己决定的：
- * 主页把本机添加过的 roleIds 发上来，服务端只返回/刷新这一批（不会下发全库列表）。
- */
+/* ------------------------------------------------------------- 自己的数据 */
 
+export const getAccounts = () => request('/api/accounts');
 export const addAccount = (payload) => request('/api/accounts', { method: 'POST', body: payload });
-export const queryAccounts = (roleIds) =>
-  request('/api/accounts/query', { method: 'POST', body: { roleIds } });
+export const importLocalAccounts = (accounts) =>
+  request('/api/accounts/import', { method: 'POST', body: { accounts } });
 export const refreshAccount = (roleId) =>
   request(`/api/accounts/${encodeURIComponent(roleId)}/refresh`, { method: 'POST' });
-export const refreshAll = (roleIds) =>
-  request('/api/accounts/refresh', { method: 'POST', body: { roleIds } });
+export const refreshAll = () => request('/api/accounts/refresh', { method: 'POST' });
 export const updateBaseline = (roleId, lastWeekLikes) =>
   request(`/api/accounts/${encodeURIComponent(roleId)}`, {
     method: 'PATCH',
     body: { lastWeekLikes },
   });
+export const removeAccount = (roleId) =>
+  request(`/api/accounts/${encodeURIComponent(roleId)}`, { method: 'DELETE' });
 
 /* --------------------------------------------------------------- 管理端 */
 
@@ -136,6 +143,7 @@ const qs = (params) => {
 
 export const adminOverview = () => request('/api/admin/overview');
 export const adminUsers = () => request('/api/admin/users');
+export const adminUserDetail = (id) => request(`/api/admin/users/${id}`);
 export const adminSetAdmin = (id, isAdmin) =>
   request(`/api/admin/users/${id}`, { method: 'PATCH', body: { isAdmin } });
 export const adminResetPassword = (id, newPassword) =>
@@ -149,6 +157,11 @@ export const adminChangeRoleId = (roleId, newRoleId) =>
   request(`/api/admin/roles/${encodeURIComponent(roleId)}/role-id`, {
     method: 'POST',
     body: { roleId: newRoleId },
+  });
+export const adminTransferRole = (roleId, userId) =>
+  request(`/api/admin/roles/${encodeURIComponent(roleId)}/owner`, {
+    method: 'POST',
+    body: { userId },
   });
 export const adminDeleteRole = (roleId) =>
   request(`/api/admin/roles/${encodeURIComponent(roleId)}`, { method: 'DELETE' });

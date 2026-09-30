@@ -2,11 +2,10 @@
  * SQLite 数据库（Node 内置 node:sqlite，仍然零第三方依赖）。
  *
  * 表结构说明：
- *   users     用户（只用于登录 / 管理员权限，和游戏账号没有任何关系）
+ *   users     用户（游客不存在数据库里，游客的账号只存浏览器本地）
  *             is_admin = 普通管理员；is_super = 超级管理员（全站唯一，不能被降级/删除）
  *   sessions  登录会话（token 存本地，请求带 Authorization: Bearer <token>）
  *   roles     游戏账号：roleId + 名字 + 大区 + 上周点赞(基线) + 当前总点赞
- *             ★ 全站共享：不绑定任何用户，谁都能添加/查看/修改（游客添加的也在库里）
  *             ★ 昵称只在 display_name 里，用于把 roleId 显示成人看得懂的名字
  *   audit_logs 操作日志（管理员改动留痕）
  *   settings  运行状态（例如「这一周的结算任务已经跑过了」）
@@ -137,52 +136,122 @@ const MIGRATIONS = [
     `,
   },
   {
-    version: 4,
-    name: 'roles-standalone',
-    sql: `
-      -- 游戏账号改为全站共享：不再绑定用户，游客（未登录）添加的账号同样入库、后台可见。
-      -- SQLite 不能直接 DROP COLUMN 掉带外键的列，所以整表重建后把数据原样搬过去。
-      CREATE TABLE IF NOT EXISTS roles_standalone (
-        role_id                TEXT PRIMARY KEY,
-        display_name           TEXT,
-        region                 TEXT NOT NULL,
-        baseline               INTEGER NOT NULL DEFAULT 0,
-        baseline_week_key      TEXT,
-        baseline_source        TEXT,
-        baseline_estimated     INTEGER NOT NULL DEFAULT 0,
-        baseline_updated_at    TEXT,
-        baseline_from_week_key TEXT,
-        profile_json           TEXT,
-        current_likes          INTEGER,
-        last_queried_at        TEXT,
-        last_snapshot_likes    INTEGER,
-        last_snapshot_week_key TEXT,
-        last_snapshot_at       TEXT,
-        last_error             TEXT,
-        created_at             TEXT NOT NULL,
-        updated_at             TEXT NOT NULL
+    version: 5,
+    name: 'roles-rebind-users',
+    /**
+     * 降级兼容迁移：如果这个库被「账号不绑用户」的版本（v4）改过，
+     * roles 表会没有 user_id，老代码读不了 —— 这里把它重建回来，
+     * 并按操作日志把每个账号挂回「当初添加它的人」（role.add 的 actor）。
+     *
+     * 对没被改过的库（roles 已经有 user_id）什么都不做，原有归属保持原样。
+     */
+    run(db) {
+      const columns = db.prepare('PRAGMA table_info(roles)').all().map((row) => row.name);
+      if (columns.includes('user_id')) {
+        console.log('[db] roles 表本来就有 user_id，跳过重建');
+        return;
+      }
+
+      // 兜底：万一库里一个用户都没有（极端情况），先建一个承载数据用的账号
+      db.exec(`
+        INSERT INTO users (username, password_hash, is_guest, is_admin, created_at)
+        SELECT 'legacy-import', NULL, 0, 0, datetime('now')
+        WHERE NOT EXISTS (SELECT 1 FROM users);
+      `);
+
+      const userIds = new Set(db.prepare('SELECT id FROM users').all().map((row) => Number(row.id)));
+      const existingUserId = (value) => (value !== null && userIds.has(Number(value)) ? Number(value) : null);
+
+      // ① 谁用 role.add 添加的（actor 形如 user:3 / admin:3）
+      const ownerByRole = new Map();
+      for (const row of db.prepare(
+        "SELECT target, actor FROM audit_logs WHERE action = 'role.add' ORDER BY id ASC",
+      ).all()) {
+        const match = /^(?:user|admin):(\d+)$/.exec(String(row.actor));
+        const roleId = String(row.target ?? '');
+        if (match && roleId && !ownerByRole.has(roleId)) ownerByRole.set(roleId, Number(match[1]));
+      }
+
+      // ② 旧版 JSON 导入的账号 → legacy-import 账号；③ 再不行 → 超级管理员 / 第一个用户
+      const legacyUser = existingUserId(
+        db.prepare("SELECT id FROM users WHERE username = 'legacy-import' LIMIT 1").get()?.id,
       );
+      const fallbackUser = existingUserId(
+        db.prepare('SELECT id FROM users ORDER BY is_super DESC, id ASC LIMIT 1').get()?.id,
+      );
+      if (legacyUser === null && fallbackUser === null) {
+        throw new Error('库里没有任何用户，无法把游戏账号挂回去');
+      }
 
-      INSERT OR IGNORE INTO roles_standalone (
-        role_id, display_name, region, baseline, baseline_week_key, baseline_source,
-        baseline_estimated, baseline_updated_at, baseline_from_week_key, profile_json,
-        current_likes, last_queried_at, last_snapshot_likes, last_snapshot_week_key, last_snapshot_at,
-        last_error, created_at, updated_at
-      )
-      SELECT
-        role_id, display_name, region, baseline, baseline_week_key, baseline_source,
-        baseline_estimated, baseline_updated_at, baseline_from_week_key, profile_json,
-        current_likes, last_queried_at, last_snapshot_likes, last_snapshot_week_key, last_snapshot_at,
-        last_error, created_at, updated_at
-      FROM roles;
+      db.exec(`
+        CREATE TABLE roles_with_user (
+          role_id                TEXT PRIMARY KEY,
+          user_id                INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          display_name           TEXT,
+          region                 TEXT NOT NULL,
+          baseline               INTEGER NOT NULL DEFAULT 0,
+          baseline_week_key      TEXT,
+          baseline_source        TEXT,
+          baseline_estimated     INTEGER NOT NULL DEFAULT 0,
+          baseline_updated_at    TEXT,
+          baseline_from_week_key TEXT,
+          profile_json           TEXT,
+          current_likes          INTEGER,
+          last_queried_at        TEXT,
+          last_snapshot_likes    INTEGER,
+          last_snapshot_week_key TEXT,
+          last_snapshot_at       TEXT,
+          last_error             TEXT,
+          created_at             TEXT NOT NULL,
+          updated_at             TEXT NOT NULL
+        );
+      `);
 
-      DROP TABLE roles;
-      ALTER TABLE roles_standalone RENAME TO roles;
-      CREATE INDEX IF NOT EXISTS idx_roles_created ON roles(created_at);
+      const insert = db.prepare(`
+        INSERT INTO roles_with_user (
+          role_id, user_id, display_name, region, baseline, baseline_week_key, baseline_source,
+          baseline_estimated, baseline_updated_at, baseline_from_week_key, profile_json,
+          current_likes, last_queried_at, last_snapshot_likes, last_snapshot_week_key, last_snapshot_at,
+          last_error, created_at, updated_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      `);
 
-      -- 账号已经独立于用户，遗留的「游客用户」没有任何用处了，直接清掉
-      DELETE FROM users WHERE is_guest = 1;
-    `,
+      const rows = db.prepare('SELECT * FROM roles').all();
+      let reassigned = 0;
+      for (const row of rows) {
+        const owner =
+          existingUserId(ownerByRole.get(String(row.role_id))) ?? legacyUser ?? fallbackUser;
+        insert.run(
+          row.role_id,
+          owner,
+          row.display_name ?? null,
+          row.region ?? '',
+          Number(row.baseline ?? 0),
+          row.baseline_week_key ?? null,
+          row.baseline_source ?? null,
+          Number(row.baseline_estimated ?? 0) ? 1 : 0,
+          row.baseline_updated_at ?? null,
+          row.baseline_from_week_key ?? null,
+          row.profile_json ?? null,
+          row.current_likes ?? null,
+          row.last_queried_at ?? null,
+          row.last_snapshot_likes ?? null,
+          row.last_snapshot_week_key ?? null,
+          row.last_snapshot_at ?? null,
+          row.last_error ?? null,
+          row.created_at,
+          row.updated_at,
+        );
+        reassigned += 1;
+      }
+
+      db.exec(`
+        DROP TABLE roles;
+        ALTER TABLE roles_with_user RENAME TO roles;
+        CREATE INDEX IF NOT EXISTS idx_roles_user ON roles(user_id);
+      `);
+      console.log(`[db] 已把 ${reassigned} 个游戏账号重新挂回「添加它的用户」名下`);
+    },
   },
 ];
 
@@ -214,7 +283,9 @@ export function migrate(db) {
     if (migration.version <= current) continue;
     db.exec('BEGIN');
     try {
-      db.exec(migration.sql);
+      // 纯 SQL 迁移直接 exec；需要看情况决定的（比如降级兼容）走 run()
+      if (typeof migration.run === 'function') migration.run(db);
+      else db.exec(migration.sql);
       db.exec(`PRAGMA user_version = ${migration.version}`);
       db.exec('COMMIT');
       console.log(`[db] 已应用迁移 v${migration.version}（${migration.name}）`);
@@ -260,6 +331,7 @@ export function rowToRole(row) {
   }
   return {
     roleId: String(row.role_id),
+    userId: Number(row.user_id),
     nickname: row.display_name ?? '',
     region: row.region,
     profile,

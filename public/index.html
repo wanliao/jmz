@@ -20,7 +20,7 @@
           <span class="account-avatar" id="accountAvatar" aria-hidden="true">游</span>
           <span class="profile-text">
             <span class="account-name" id="accountName">游客</span>
-            <span class="account-sub" id="accountSub">未登录 · 也能添加账号</span>
+            <span class="account-sub" id="accountSub">本地模式</span>
           </span>
         </button>
         <span class="brand-title">金拇指</span>
@@ -64,9 +64,9 @@
 
       <div class="notice notice-guest" id="guestNotice" hidden>
         <span>
-          <strong>未登录也能用</strong>：添加的账号会存在服务器上，但<strong>列表只在这台设备上显示</strong>——
-          别人打开看不到你的账号，管理员在后台能看到全部。换设备时重新添加一次同样的昵称即可（不会重复入库）。
+          <strong>未登录</strong>：你添加的游戏账号只保存在本地，未云端保存并跨设备同步，请<strong>注册</srong>账号
         </span>
+       
       </div>
 
       <div class="notice" id="adapterNotice" hidden></div>
@@ -83,11 +83,7 @@
           </span>
           <h2>暂无账号</h2>
           <button class="btn btn-lg btn-neutral" type="button" data-open-add>点击添加账号</button>
-          <p class="empty-note">
-            首次添加账号需要手填上周点赞数作为基准，之后每周由服务器自动结算。<br />
-            这里只显示<strong>你在这台设备上添加过</strong>的账号；添加别人加过的角色会直接加进你的列表，不会重复。<br />
-            换设备 / 清过浏览器数据后，用同样的昵称再添加一次就能把账号找回来（会直接认领，不查接口）。
-          </p>
+          <p class="empty-note">首次添加账号需要手填写上周点赞数作为基准，之后每周由服务器自动结算。</p>
         </section>
       </main>
 
@@ -152,11 +148,6 @@
 
         <div class="form-error" id="addFormError" hidden></div>
 
-        <p class="hint">
-          这个角色如果之前已经有人加过，会直接加进<strong>你的列表</strong>（不会重复入库，也不会覆盖别人填的上周点赞）；
-          如果玩家在游戏里<strong>改了昵称</strong>，用新昵称添加一次就会自动把库里的名字更正过来。
-        </p>
-
         <footer class="sheet-foot">
           <button class="btn btn-ghost" type="button" data-close-dialog>取消</button>
           <button class="btn btn-primary" type="submit" id="addSubmitBtn">添加并查询</button>
@@ -199,7 +190,7 @@
           <button class="icon-btn" type="button" data-close-dialog aria-label="关闭">✕</button>
         </header>
 
-        <!-- 已登录时的账号卡片 -->
+        <!-- 已登录（含游客）时的账号卡片 -->
         <div id="accountInfo" hidden>
           <div class="account-card">
             <span class="account-avatar account-avatar-lg" id="accountInfoAvatar" aria-hidden="true">游</span>
@@ -219,31 +210,14 @@
 
         <!-- 注册 / 登录表单 -->
         <div id="authForms">
-          <p class="hint">
-            主页的账号列表只显示<strong>这台设备添加过</strong>的账号，不需要登录。
-            想删除服务器上的账号、改公告，才需要用管理员账号登录。
-          </p>
           <div class="tabs tabs-inline">
-            <button class="tab is-active" type="button" data-auth-tab="login">登录</button>
-            <button class="tab" type="button" data-auth-tab="register">注册</button>
+            <button class="tab is-active" type="button" data-auth-tab="register">注册</button>
+            <button class="tab" type="button" data-auth-tab="login">登录</button>
           </div>
 
-          <form id="loginForm" novalidate>
-            <div class="field">
-              <label for="loginUsername">账号</label>
-              <input id="loginUsername" type="text" autocomplete="username" />
-            </div>
-            <div class="field">
-              <label for="loginPassword">密码</label>
-              <input id="loginPassword" type="password" autocomplete="current-password" />
-            </div>
-            <div class="form-error" id="loginError" hidden></div>
-            <button class="btn btn-primary btn-block" type="submit" id="loginSubmit">登录</button>
-          </form>
-
-          <form id="registerForm" novalidate hidden>
+          <form id="registerForm" novalidate>
             <p class="hint" id="registerHint">
-              注册只是为了拿到一个登录身份（比如管理员给你开了后台权限）。
+              注册后现在这些游戏账号会一起保留（同一个身份原地升级），换设备登录就能看到。
             </p>
             <div class="field">
               <label for="registerUsername">账号</label>
@@ -254,7 +228,21 @@
               <input id="registerPassword" type="password" autocomplete="new-password" placeholder="英文/数字" />
             </div>
             <div class="form-error" id="registerError" hidden></div>
-            <button class="btn btn-primary btn-block" type="submit" id="registerSubmit">注册</button>
+            <button class="btn btn-primary btn-block" type="submit" id="registerSubmit">注册并继续</button>
+          </form>
+
+          <form id="loginForm" novalidate hidden>
+            <p class="hint">用之前注册的账号登录，游戏账号会从云端同步下来。</p>
+            <div class="field">
+              <label for="loginUsername">账号</label>
+              <input id="loginUsername" type="text" autocomplete="username" />
+            </div>
+            <div class="field">
+              <label for="loginPassword">密码</label>
+              <input id="loginPassword" type="password" autocomplete="current-password" />
+            </div>
+            <div class="form-error" id="loginError" hidden></div>
+            <button class="btn btn-primary btn-block" type="submit" id="loginSubmit">登录</button>
           </form>
         </div>
 

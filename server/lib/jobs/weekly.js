@@ -1,10 +1,9 @@
 /**
  * 定时任务：
  *  1. 每周一 00:00:01（游戏周起点）之后，遍历数据库里所有 roleId，
- *     用接口 B 查到点赞数并把新一周的基线设成这个值；
+ *     用接口 B 查到点赞数并记成「上一周的点赞记录」，同时把新一周的基线设成这个值；
  *  2. 可选的周期性全量刷新（AUTO_REFRESH_MINUTES > 0 时开启）。
  *
- * 账号是全站共享的、不绑定用户，所以这里直接刷全库。
  * 用「每 15 秒检查一次 + 记录已结算的周标识」而不是精确 setTimeout，
  * 这样进程重启、服务器时间跳变、机器休眠后都能自愈，且不会重复结算。
  */
@@ -41,12 +40,24 @@ export function startScheduler({ service, config, logger = console, now = () => 
         );
       }
 
-      // 周期性全量刷新（可选）：这个必须刷全库，不能只刷某台设备看的那几个
+      // 周期性全量刷新（可选）
       const intervalMs = Math.max(0, config.autoRefreshMinutes) * 60_000;
       if (intervalMs > 0 && at.getTime() - lastAutoRefreshAt >= intervalMs) {
         lastAutoRefreshAt = at.getTime();
-        const result = await service.refreshAccounts(null, at);
-        logger.log(`[job] 自动刷新完成 成功=${result.succeeded} 失败=${result.failed}`);
+        const roles = service.repo.roles.listAllRoles();
+        const byUser = new Map();
+        for (const role of roles) {
+          if (!byUser.has(role.userId)) byUser.set(role.userId, []);
+          byUser.get(role.userId).push(role);
+        }
+        let succeeded = 0;
+        let failed = 0;
+        for (const userId of byUser.keys()) {
+          const result = await service.refreshAll(userId, at);
+          succeeded += result.succeeded;
+          failed += result.failed;
+        }
+        logger.log(`[job] 自动刷新完成 成功=${succeeded} 失败=${failed}`);
       }
     } catch (error) {
       logger.error('[job] 定时任务执行失败：', error);

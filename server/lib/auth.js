@@ -2,8 +2,7 @@
  * 认证：注册 / 登录 / 会话。
  *
  * 设计要点：
- *  - 只有**管理后台**需要身份：统计页不需要登录，游戏账号全站共享、不绑定用户，
- *    所以这里的用户体系只用来控制「谁能进后台、谁是管理员」；
+ *  - 没有「游客用户」：未登录时前端走**本地模式**，游戏账号只存浏览器，不入库；
  *  - 密码用 PBKDF2-SHA256 + 随机盐哈希存储，绝不存明文；
  *  - 会话 token 存在浏览器 localStorage，请求带 Authorization: Bearer <token>。
  */
@@ -64,7 +63,8 @@ export function createAuthService({ repo, config }) {
 
   return {
     /**
-     * 注册。注册只影响登录身份（可用于进管理后台），和游戏账号没有任何关系。
+     * 注册。当前若已登录（一般不会）也只新建账号，不影响已有账号。
+     * 未登录时前端攒在浏览器里的游戏账号，注册后由 /api/accounts/import 搬到云端。
      */
     register({ username, password, currentUser = null, userAgent = null }) {
       const valid = validateCredentials(username, password);

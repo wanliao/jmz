@@ -5,14 +5,12 @@
  * 用法：
  *   node scripts/ui-check.mjs                                   # mock 模式跑全流程
  *   node scripts/ui-check.mjs --nickname 你的角色名 --zone 1     # 真实接口模式下测「添加账号」
- *   node scripts/ui-check.mjs --admin admin:密码                 # 测完把加进去的测试账号从库里删掉
  *   node scripts/ui-check.mjs http://127.0.0.1:8799
  *
  * 为真实接口模式考虑：不给 --nickname 时只跑「不需要查角色」的检查
  * （首屏渲染、弹窗、表单校验、主题切换），不会白白消耗一次接口 A 调用。
  *
- * 覆盖：首屏渲染 → 表单校验 → 添加账号 → 卡片内容 → 刷新页面恢复本机列表 → 刷新 →
- *       改基线（含异常钳制）→ 主题切换 → 刷新全部 → 从本机列表移除。
+ * 覆盖：首屏渲染 → 表单校验 → 添加账号 → 卡片内容 → 刷新 → 改基线（含异常钳制）→ 主题切换 → 刷新全部 → 删除。
  */
 
 import { spawn } from 'node:child_process';
@@ -33,7 +31,6 @@ const APP = (
 ).replace(/\/$/, '');
 const realNickname = argValue('--nickname');
 const realZone = Number(argValue('--zone') ?? 1);
-const adminCred = argValue('--admin');
 const DEBUG_PORT = 9300 + (process.pid % 400);
 const PROFILE = path.join(os.tmpdir(), `kimuzhi-ui-${Date.now()}`);
 
@@ -200,7 +197,7 @@ try {
 
   const canWrite = mode === 'mock' || Boolean(realNickname);
 
-  console.log('\n[2] 未登录：账号弹窗里只应有登录/注册的输入框（游戏账号不需要登录）');
+  console.log('\n[2] 未登录（本地模式）：账号弹窗里只应有该有的输入框');
   // 关键：按真实几何尺寸判断可见性。只看 hidden 属性会被作者样式的 display 骗过
   //（之前 .sheet form { display: block } 就让注册/登录/改密码三张表单同时显示）
   const visibleInputs = `
@@ -221,22 +218,26 @@ try {
   check('点头像能打开账号弹窗', await waitFor(`document.getElementById('accountDialog').open === true`));
 
   const openedInputs = await evaluate(visibleInputs);
-  check('未登录时弹窗默认是登录表单（不该露出别的表单）',
-    openedInputs.length === 2 && openedInputs.includes('loginUsername'),
+  check('未登录时弹窗直接就是注册表单（不该露出别的表单）',
+    openedInputs.length === 2 && openedInputs.includes('registerUsername'),
     openedInputs.join(',') || '无');
   check('未登录时看不到「原密码 / 新密码」',
     !openedInputs.includes('oldPassword') && !openedInputs.includes('newPassword'));
-  check('登录时看不到注册表单的输入框',
-    !openedInputs.includes('registerUsername') && !openedInputs.includes('registerPassword'));
 
-  await evaluate(`document.querySelector('[data-auth-tab="register"]').click()`);
+  check('注册界面只有账号 + 密码两个输入框',
+    openedInputs.length === 2 &&
+      openedInputs.includes('registerUsername') &&
+      openedInputs.includes('registerPassword'),
+    openedInputs.join(','));
+  check('注册时看不到登录表单的输入框',
+    !openedInputs.includes('loginUsername') && !openedInputs.includes('loginPassword'));
+
+  await evaluate(`document.querySelector('[data-auth-tab="login"]').click()`);
   await sleep(300);
-  const registerInputs = await evaluate(visibleInputs);
-  check('切到注册时只有注册的两个输入框',
-    registerInputs.length === 2 &&
-      registerInputs.includes('registerUsername') &&
-      registerInputs.includes('registerPassword'),
-    registerInputs.join(',') || '无');
+  const loginInputs = await evaluate(visibleInputs);
+  check('切到登录时只有登录的两个输入框',
+    loginInputs.length === 2 && loginInputs.includes('loginUsername') && loginInputs.includes('loginPassword'),
+    loginInputs.join(',') || '无');
 
   await evaluate(`document.getElementById('accountDialog').close()`);
 
@@ -293,7 +294,8 @@ try {
       };
     })()
   `);
-  check('卡片显示大区标识', cardInfo?.badge === (region === 'qq' ? 'QQ区' : '微信区'), cardInfo?.badge);  check('卡片显示「本周已刷 / 350」', cardInfo?.cap === '/ 350', `${cardInfo?.weekLikes} ${cardInfo?.cap}`);
+  check('卡片显示大区标识', cardInfo?.badge === (region === 'qq' ? 'QQ区' : '微信区'), cardInfo?.badge);
+  check('卡片显示「本周已刷 / 350」', cardInfo?.cap === '/ 350', `${cardInfo?.weekLikes} ${cardInfo?.cap}`);
   check('进度条有宽度', /%$/.test(cardInfo?.barWidth ?? ''), cardInfo?.barWidth);
   check('当前总点赞与基线都有值', Number(cardInfo?.current?.replace(/,/g, '')) > 0 && cardInfo?.baseline === '2,000',
     `当前=${cardInfo?.current} 基线=${cardInfo?.baseline}`);
@@ -322,18 +324,6 @@ try {
         return !text.includes('王牌印记') && !text.includes('K/D') && !text.includes('注册于') && !document.querySelector('.chip-division');
       })()
     `));
-
-  console.log('\n[3.5] 刷新页面：账号要从本机列表（localStorage）恢复出来');
-  const myRolesStored = await evaluate(`localStorage.getItem('hpjy.my.roles.v1')`);
-  check('roleId 已经记进本机列表', String(myRolesStored ?? '').includes(String(cardInfo?.roleId)), myRolesStored ?? '(空)');
-
-  await send('Page.reload', {});
-  await sleep(2500);
-  await waitFor(`document.readyState === 'complete' && !!document.getElementById('addBtn')`);
-  check('刷新后卡片还在（说明列表是按设备记的）',
-    await waitFor(`
-      [...document.querySelectorAll('.card')].some((c) => c.dataset.card === ${JSON.stringify(cardInfo?.roleId)})
-    `, 20000));
 
   console.log('\n[4] 刷新单个账号');
   await evaluate(`document.querySelector('.card[data-card="${cardInfo?.roleId}"] [data-act="refresh"]').click()`);
@@ -371,7 +361,7 @@ try {
     })()
   `);
   check('当前 < 基线时显示 0（不是负数）', anomaly?.weekLikes === '0', `已刷=${anomaly?.weekLikes}`);
-  check('卡片给出异常提示', anomaly?.anomaly === true && anomaly?.alert.includes('比上周点赞'), anomaly?.alert.slice(0, 30));
+  check('卡片给出异常提示', anomaly?.anomaly === true && anomaly?.alert.includes('比上周基线'), anomaly?.alert.slice(0, 30));
   check('异常提示里带「修正」按钮', anomaly?.hasFixButton === true);
 
   console.log('\n[6] 修正回正常基线');
@@ -391,44 +381,11 @@ try {
   const themeAfter = await evaluate(`document.documentElement.dataset.theme`);
   check('主题能切换', themeBefore !== themeAfter, `${themeBefore} → ${themeAfter}`);
 
-  console.log('\n[8] 刷新全部 / 从本机列表移除');
+  console.log('\n[8] 刷新全部 / 删除');
   await evaluate(`document.getElementById('refreshAllBtn').click()`);
   check('刷新全部完成后按钮恢复可用', await waitFor(`document.getElementById('refreshAllBtn').disabled === false`, 15000));
   await evaluate(`window.confirm = () => true; document.querySelector('.card[data-card="${cardInfo?.roleId}"] [data-act="delete"]').click(); true`);
-  check('移除后卡片消失', await waitFor(`!document.querySelector('.card[data-card="${cardInfo?.roleId}"]')`));
-  check('本机列表里也不再留着它',
-    await evaluate(`!String(localStorage.getItem('hpjy.my.roles.v1') ?? '').includes(${JSON.stringify(String(cardInfo?.roleId))})`));
-  check('服务器上的账号没被删（还能查到）',
-    await evaluate(`
-      fetch('/api/accounts/query', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ roleIds: [${JSON.stringify(String(cardInfo?.roleId))}] }),
-      }).then((r) => r.json()).then((d) => d.ok === true && d.data.accounts.length === 1)
-    `));
-
-  // 主页的「删」只移除本机列表，想清掉服务器上的这条测试数据要管理员权限
-  if (adminCred) {
-    const [adminUser, adminPass] = adminCred.split(':');
-    const login = await fetch(`${APP}/api/auth/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: adminUser, password: adminPass }),
-    })
-      .then((r) => r.json())
-      .catch(() => null);
-    const token = login?.data?.token;
-    const deleted = token
-      ? await fetch(`${APP}/api/admin/roles/${encodeURIComponent(cardInfo?.roleId)}`, {
-          method: 'DELETE',
-          headers: { Authorization: `Bearer ${token}` },
-        }).then((r) => r.status)
-      : 0;
-    check('已从数据库删掉这次校验用的账号', deleted === 200 || deleted === 404, `HTTP ${deleted}`);
-  } else {
-    console.log(`    提示：这次加的账号还留在服务器上（roleId=${cardInfo?.roleId}）。`);
-    console.log('    想自动清掉就加 --admin 管理员账号:密码，或到管理后台「游戏账号」里删。');
-  }
+  check('删除后卡片消失', await waitFor(`!document.querySelector('.card[data-card="${cardInfo?.roleId}"]')`));
   }
 
   console.log(`\n结果：通过 ${pass} 项，失败 ${fail} 项\n`);

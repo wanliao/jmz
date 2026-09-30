@@ -1,12 +1,9 @@
 /**
  * 业务服务层：把「接口适配器 + 结算引擎 + SQLite 数据库」串起来。
  *
- * 设计要点：
- *  - 游戏账号是**全站唯一**的：一个 roleId 在库里只有一条记录，不绑定任何用户；
- *  - 但「看哪些账号」是**每台设备自己决定**的：主页只显示本机添加过的 roleId
- *    （列表存在浏览器里，服务端只按 roleIds 批量查询/刷新，不会把全库列表发出去）；
- *  - 添加已存在的角色 = 把它「认领」进本机列表，不重复入库、也不覆盖别人的基线；
- *  - 真正从数据库删账号只在管理后台（需要管理员）。
+ * 与旧版的区别：
+ *  - 所有账号操作都带 userId，只能操作自己的角色；
+ *  - 点赞数会写进 weekly_likes（★ 只有 roleId + 点赞数，不存昵称）；
  *  - 每周一 00:00:01 的结算任务遍历全库 roleId（用 roleId 请求接口 B）。
  */
 
@@ -18,38 +15,10 @@ import {
   isRegionId,
 } from '../../shared/constants.js';
 import { getWeekStart } from '../../shared/week.js';
-import { badRequest, notFound } from './errors.js';
+import { HttpError, badRequest, notFound } from './errors.js';
 import { BASELINE_SOURCE, buildAccountView, previousWeekKey, settleAccount } from './settlement.js';
 
 const nowIso = (value = new Date()) => new Date(value).toISOString();
-
-/** 一次最多处理多少个 roleId（防止有人塞一个超大数组） */
-const MAX_ACCOUNT_IDS = 100;
-
-/** 把客户端传来的 roleId 列表清洗成「合法、去重、有序」的数组 */
-export function normalizeRoleIds(value) {
-  const list = Array.isArray(value) ? value : [];
-  const seen = new Set();
-  const out = [];
-  for (const item of list) {
-    const id = String(item ?? '').trim();
-    if (!/^\d{1,20}$/.test(id) || seen.has(id)) continue;
-    seen.add(id);
-    out.push(id);
-    if (out.length >= MAX_ACCOUNT_IDS) break;
-  }
-  return out;
-}
-
-/**
- * 这个角色在游戏里当前叫什么。
- * 接口A 的档案里 roleName 是游戏内真实昵称（玩家改名后它会变），以它为准；
- * 拿不到就退回用户填的那个昵称。
- */
-function currentRoleName(resolved, fallback) {
-  const raw = resolved?.profile?.roleName ?? fallback;
-  return String(raw ?? '').trim().slice(0, NICKNAME_MAX_LENGTH);
-}
 
 function errorInfo(error) {
   return {
@@ -130,10 +99,13 @@ export function createService({ config, repo, adapters, auth }) {
     }
   }
 
-  /** 全站共享：账号按 roleId 找，找到就能操作，不再校验归属 */
-  function requireRole(roleId) {
+  function requireOwnedRole(userId, roleId) {
     const role = repo.roles.getRole(roleId);
     if (!role) throw notFound('账号不存在或已被删除', 'ACCOUNT_NOT_FOUND');
+    if (role.userId !== Number(userId)) {
+      // 不暴露「存在但不属于你」，统一按不存在处理
+      throw notFound('账号不存在或已被删除', 'ACCOUNT_NOT_FOUND');
+    }
     return role;
   }
 
@@ -159,31 +131,19 @@ export function createService({ config, repo, adapters, auth }) {
         version: config.version,
         // 首页底部那张卡片显示的内容，由管理员在后台改（存 settings 表，不用改库结构）
         announcement: repo.settings.get('announcement') ?? '',
+        // 未登录时前端走本地模式（账号存浏览器，不入库）
+        allowLocalMode: config.allowLocalMode,
       };
     },
 
-    /**
-     * 按 roleIds 查询账号（主页用）：只返回客户端指定的那些，全库列表不会下发。
-     * missing 里是被管理员删掉（或 roleId 不合法）的那些，前端据此清理本机列表。
-     */
-    async queryAccounts(roleIds, now = new Date()) {
-      const ids = normalizeRoleIds(roleIds);
-      const roles = ids.map((id) => repo.roles.getRole(id)).filter(Boolean);
+    /** 账号列表（只返回自己的；顺便把基线推进到当前周） */
+    async listAccounts(userId, now = new Date()) {
+      const roles = repo.roles.listRolesByUser(userId);
       for (const role of roles) settleAndPersist(role, now);
-      const found = new Set(roles.map((role) => role.roleId));
-      return {
-        accounts: roles.map((role) => view(role, now)),
-        missing: ids.filter((id) => !found.has(id)),
-      };
+      return roles.map((role) => view(role, now));
     },
 
-    /**
-     * 添加账号：不需要登录，游客添加的账号同样入库。
-     * 如果这个 roleId 全站已经有了，就把它「认领」进本机列表，并且顺手
-     * **把库里的昵称/档案同步成游戏里的当前值**（玩家改名后，用新昵称再添加一次就会自动更正），
-     * 但绝不覆盖基线、当前点赞这些成绩数据。
-     */
-    async addAccount({ nickname, region, lastWeekLikes }, { actor = 'guest' } = {}, now = new Date()) {
+    async addAccount(userId, { nickname, region, lastWeekLikes }, now = new Date()) {
       const name = String(nickname ?? '').trim();
       if (!name) throw badRequest('请填写游戏昵称', 'INVALID_NICKNAME');
       if (name.length > NICKNAME_MAX_LENGTH) {
@@ -202,36 +162,25 @@ export function createService({ config, repo, adapters, auth }) {
       const week = getWeekStart(now, timeZone);
       const resolved = await adapters.resolveRoleId({ nickname: name, region });
       const roleId = String(resolved.roleId);
-      const gameName = currentRoleName(resolved, name);
 
-      // 全站唯一：库里已经有了就直接认领（顺手同步昵称/档案，不动成绩数据）
+      // 同一个 roleId 全库唯一：别人加过、或者自己已经加过，都拒绝
       const existing = repo.roles.getRole(roleId);
       if (existing) {
-        settleAndPersist(existing, now);
-
-        const patch = {};
-        if (gameName && gameName !== existing.nickname) patch.display_name = gameName;
-        if (resolved.profile) patch.profile_json = resolved.profile;
-        if (Object.keys(patch).length > 0) repo.roles.updateRole(roleId, patch);
-
-        const renamed = patch.display_name ? { from: existing.nickname ?? '', to: patch.display_name } : null;
-        repo.audit.log({
-          actor,
-          action: renamed ? 'role.rename' : 'role.claim',
-          target: roleId,
-          detail: renamed ? { ...renamed, source: name } : { nickname: existing.nickname },
-        });
-        return {
-          account: view(repo.roles.getRole(roleId), now),
-          claimed: true,
-          renamed,
-          warning: null,
-        };
+        const mine = existing.userId === Number(userId);
+        throw new HttpError(
+          409,
+          'DUPLICATE_ACCOUNT',
+          mine
+            ? `「${existing.nickname || roleId}」你已经添加过了，不用重复添加`
+            : '这个角色已经被其他用户添加了',
+          { roleId, mine, existing: mine ? view(existing, now) : null },
+        );
       }
 
       const role = {
         roleId,
-        nickname: gameName,
+        userId: Number(userId),
+        nickname: name,
         region,
         profile: resolved.profile ?? null,
         createdAt: nowIso(now),
@@ -272,24 +221,18 @@ export function createService({ config, repo, adapters, auth }) {
 
       repo.roles.createRole(role);
 
-      // actor 为 "guest" 表示未登录的访客添加的，后台「添加者」列会显示成「游客」
       repo.audit.log({
-        actor,
+        actor: `user:${userId}`,
         action: 'role.add',
         target: roleId,
-        detail: { nickname: gameName, typed: name, region, baseline: Math.floor(baselineValue) },
+        detail: { nickname: name, region, baseline: Math.floor(baselineValue) },
       });
 
-      return {
-        account: view(repo.roles.getRole(roleId), now),
-        claimed: false,
-        renamed: null,
-        warning: pulled.ok ? null : pulled.error,
-      };
+      return { account: view(repo.roles.getRole(roleId), now), warning: pulled.ok ? null : pulled.error };
     },
 
-    async refreshAccount(roleId, now = new Date()) {
-      const role = requireRole(roleId);
+    async refreshAccount(userId, roleId, now = new Date()) {
+      const role = requireOwnedRole(userId, roleId);
 
       // 顺序很重要：先结算（用刷新前的快照推进基线），再去查最新点赞
       settleAndPersist(role, now);
@@ -299,14 +242,8 @@ export function createService({ config, repo, adapters, auth }) {
       return { account: view(repo.roles.getRole(roleId), now), warning: pulled.ok ? null : pulled.error };
     },
 
-    /**
-     * 刷新一批账号（主页「刷新全部」用）：只刷客户端给的 roleIds，
-     * 不会顺带刷全库（别人的账号不该因为你的刷新而消耗接口调用）。
-     * roleIds 传 null 表示全库，只给内部定时任务用。
-     */
-    async refreshAccounts(roleIds, now = new Date(), { concurrency = 4 } = {}) {
-      const ids = roleIds === null ? repo.roles.listAllRoles().map((role) => role.roleId) : normalizeRoleIds(roleIds);
-      const roles = ids.map((id) => repo.roles.getRole(id)).filter(Boolean);
+    async refreshAll(userId, now = new Date(), { concurrency = 4 } = {}) {
+      const roles = repo.roles.listRolesByUser(userId);
       for (const role of roles) settleAndPersist(role, now);
 
       const results = await mapWithConcurrency(roles, concurrency, async (role) => {
@@ -315,10 +252,8 @@ export function createService({ config, repo, adapters, auth }) {
       });
 
       const failures = results.filter((item) => !item.ok);
-      const found = new Set(roles.map((role) => role.roleId));
       return {
-        accounts: roles.map((role) => view(repo.roles.getRole(role.roleId), now)),
-        missing: ids.filter((id) => !found.has(id)),
+        accounts: repo.roles.listRolesByUser(userId).map((role) => view(role, now)),
         total: roles.length,
         succeeded: results.length - failures.length,
         failed: failures.length,
@@ -326,9 +261,9 @@ export function createService({ config, repo, adapters, auth }) {
       };
     },
 
-    /** 需求 6.4：允许手动修正「上周点赞数」 */
-    async updateAccountBaseline(roleId, lastWeekLikes, { actor = 'guest' } = {}, now = new Date()) {
-      const role = requireRole(roleId);
+    /** 需求 6.4：允许用户手动修正「上周点赞数」（只改自己的） */
+    async updateAccountBaseline(userId, roleId, lastWeekLikes, now = new Date()) {
+      const role = requireOwnedRole(userId, roleId);
 
       const value = Number(lastWeekLikes);
       if (!Number.isFinite(value) || value < 0 || value > LIKES_MAX_VALUE) {
@@ -346,13 +281,20 @@ export function createService({ config, repo, adapters, auth }) {
       });
 
       repo.audit.log({
-        actor,
+        actor: `user:${userId}`,
         action: 'role.baseline',
         target: roleId,
         detail: { baseline: Math.floor(value), weekKey: week },
       });
 
       return { account: view(repo.roles.getRole(roleId), now) };
+    },
+
+    async removeAccount(userId, roleId) {
+      requireOwnedRole(userId, roleId);
+      repo.roles.deleteRole(roleId);
+      repo.audit.log({ actor: `user:${userId}`, action: 'role.remove', target: roleId });
+      return { roleId: String(roleId) };
     },
 
     /**
@@ -429,8 +371,68 @@ export function createService({ config, repo, adapters, auth }) {
         settledAccounts: settled.length,
         refreshed: refreshed.length,
         refreshedFailed: refreshed.filter((item) => !item.ok).length,
-        accounts: repo.roles.listAllRoles().map((role) => view(role, now)),
+        accounts: repo.roles.listAllRoles().map((role) => ({
+          ...view(role, now),
+          userId: role.userId,
+        })),
       };
+    },
+
+    /**
+     * 注册后把「本地模式下攒的游戏账号」一次性搬到云端。
+     * 这些账号已经带 roleId / 基线 / 快照，所以不需要再查接口 A。
+     */
+    async importLocalAccounts(userId, accounts, now = new Date()) {
+      const list = Array.isArray(accounts) ? accounts.slice(0, 50) : [];
+      const imported = [];
+      const skipped = [];
+
+      for (const item of list) {
+        const roleId = String(item?.roleId ?? '').trim();
+        if (!/^\d{1,20}$/.test(roleId)) {
+          skipped.push({ roleId: roleId || '(空)', reason: 'INVALID_ROLE_ID' });
+          continue;
+        }
+        if (repo.roles.getRole(roleId)) {
+          skipped.push({ roleId, reason: 'ALREADY_EXISTS' });
+          continue;
+        }
+        if (!isRegionId(item?.region)) {
+          skipped.push({ roleId, reason: 'INVALID_REGION' });
+          continue;
+        }
+
+        const baseline = Number(item?.baseline);
+        const role = {
+          roleId,
+          userId: Number(userId),
+          nickname: String(item?.nickname ?? '').slice(0, 32),
+          region: item.region,
+          profile: item?.profile ?? null,
+          baseline: Number.isFinite(baseline) && baseline >= 0 ? Math.floor(baseline) : 0,
+          baselineWeekKey: item?.baselineWeekKey ?? getWeekStart(now, timeZone).key,
+          baselineSource: item?.baselineSource ?? BASELINE_SOURCE.USER,
+          baselineEstimated: Boolean(item?.baselineEstimated),
+          baselineUpdatedAt: item?.baselineUpdatedAt ?? nowIso(now),
+          baselineFromWeekKey: item?.baselineFromWeekKey ?? null,
+          currentLikes: Number.isFinite(Number(item?.currentLikes)) ? Math.floor(Number(item.currentLikes)) : null,
+          lastQueriedAt: item?.lastQueriedAt ?? null,
+          lastSnapshot: item?.lastSnapshot ?? null,
+          lastError: item?.lastError ?? null,
+        };
+        repo.roles.createRole(role);
+        imported.push(view(repo.roles.getRole(roleId), now));
+      }
+
+      if (imported.length > 0) {
+        repo.audit.log({
+          actor: `user:${userId}`,
+          action: 'role.import-local',
+          target: String(userId),
+          detail: { imported: imported.length, skipped: skipped.length, roleIds: imported.map((r) => r.roleId) },
+        });
+      }
+      return { imported: imported.length, skipped: skipped.length, accounts: imported, skippedDetail: skipped };
     },
   };
 }

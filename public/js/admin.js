@@ -2,8 +2,8 @@
  * 管理后台前端。
  *
  * 能力：用户管理（提升/降级管理员、重置密码、删除）、
- * 游戏账号管理（全站共享，改名/大区/基线、改 roleId、删除）、
- * 操作日志、修改自己的密码。
+ * 游戏账号管理（改名/大区/基线、改 roleId、改归属、删除）、
+ * 云端点赞记录管理（增删改）、操作日志、修改自己的密码。
  */
 
 import * as api from './api.js';
@@ -112,7 +112,7 @@ async function checkAccess() {
     }
     state.me = me;
     if (!me.user.isAdmin) {
-      showGate('这个账号不是管理员', `当前登录的是「${me.user.username ?? `用户#${me.user.id}`}」，没有后台权限。`);
+      showGate('这个账号不是管理员', `当前登录的是「${me.user.username ?? `游客#${me.user.id}`}」，没有后台权限。`);
       return false;
     }
     showPanel();
@@ -241,11 +241,11 @@ function renderUsers() {
 
   dom.userTable.innerHTML =
     users.length === 0
-      ? emptyRow(6, '没有匹配的用户')
+      ? emptyRow(8, '没有匹配的用户')
       : users
           .map((user) => {
             const isSelf = state.me?.user?.id === user.id;
-            const actions = [];
+            const actions = [`<button class="btn btn-sm btn-ghost" data-user-roles="${user.id}">查看账号</button>`];
 
             if (user.isSuper) {
               // 超级管理员全站唯一：既不能降级也不能删，改密码请用「修改我的密码」
@@ -268,6 +268,8 @@ function renderUsers() {
           <td class="mono">${user.id}</td>
           <td>${escapeHtml(user.username ?? '（无）')}${isSelf ? ' <span class="tag">我</span>' : ''}</td>
           <td>${userTag(user)}</td>
+          <td class="num">${user.roleCount}</td>
+          <td class="num">${formatNumber(user.weekLikesTotal)}</td>
           <td class="num">${user.sessionCount}</td>
           <td class="mono">${escapeHtml(formatDateTime(user.createdAt))}</td>
           <td><div class="row-actions">${actions.join('')}</div></td>
@@ -283,7 +285,7 @@ function renderRoles() {
     return (
       role.roleId.includes(keyword) ||
       String(role.nickname ?? '').toLowerCase().includes(keyword) ||
-      String(role.addedBy ?? '').toLowerCase().includes(keyword)
+      String(role.ownerLabel ?? '').toLowerCase().includes(keyword)
     );
   });
 
@@ -297,7 +299,7 @@ function renderRoles() {
           <td class="mono">${escapeHtml(role.roleId)}</td>
           <td>${escapeHtml(role.nickname ?? '（未命名）')}</td>
           <td>${role.region === 'qq' ? 'QQ区' : '微信区'}</td>
-          <td>${escapeHtml(role.addedBy ?? '')}</td>
+          <td>${escapeHtml(role.ownerLabel ?? '')}</td>
           <td class="num">${formatNumber(role.baseline)}</td>
           <td class="num">${role.hasData ? formatNumber(role.currentLikes) : '--'}</td>
           <td class="num">${formatNumber(role.weekLikes)}</td>
@@ -305,6 +307,7 @@ function renderRoles() {
             <div class="row-actions">
               <button class="btn btn-sm btn-ghost" data-role-edit="${escapeHtml(role.roleId)}">编辑</button>
               <button class="btn btn-sm btn-ghost" data-role-id="${escapeHtml(role.roleId)}">改 roleId</button>
+              <button class="btn btn-sm btn-ghost" data-role-owner="${escapeHtml(role.roleId)}">改归属</button>
               <button class="btn btn-sm btn-danger" data-role-delete="${escapeHtml(role.roleId)}">删除</button>
             </div>
           </td>
@@ -374,12 +377,31 @@ dom.editForm.addEventListener('submit', async (event) => {
 
 /* ------------------------------------------------------------ 表格操作 */
 
+const userOptions = () =>
+  state.users.map((user) => ({
+    value: user.id,
+    label: `${user.username ?? `（游客#${user.id}）`} · ${user.roleCount} 个账号`,
+  }));
+
 dom.userTable.addEventListener('click', async (event) => {
   const button = event.target.closest('button');
   if (!button) return;
-  const { userAdmin, userPassword, userDelete } = button.dataset;
+  const { userRoles, userAdmin, userPassword, userDelete } = button.dataset;
 
   try {
+    if (userRoles) {
+      const id = Number(userRoles);
+      const detail = await api.adminUserDetail(id);
+      switchTab('roles');
+      state.roles = detail.accounts.map((account) => ({
+        ...account,
+        ownerLabel: detail.user.username ?? `游客#${detail.user.id}`,
+      }));
+      renderRoles();
+      toast(`只看「${detail.user.username ?? `游客#${id}`}」的 ${state.roles.length} 个账号`, 'info');
+      return;
+    }
+
     if (userAdmin) {
       const id = Number(userAdmin);
       const isAdmin = button.dataset.value === '1';
@@ -393,7 +415,7 @@ dom.userTable.addEventListener('click', async (event) => {
       const id = Number(userPassword);
       const user = state.users.find((item) => item.id === id);
       openEdit(
-        `重置「${user?.username ?? `用户#${id}`}」的密码`,
+        `重置「${user?.username ?? `游客#${id}`}」的密码`,
         [{ name: 'newPassword', label: '新密码', type: 'text', hint: '重置后该用户已登录的设备会被踢下线。' }],
         async (values) => {
           await api.adminResetPassword(id, values.newPassword);
@@ -407,10 +429,10 @@ dom.userTable.addEventListener('click', async (event) => {
     if (userDelete) {
       const id = Number(userDelete);
       const user = state.users.find((item) => item.id === id);
-      if (!window.confirm(`删除「${user?.username ?? `用户#${id}`}」？\n（游戏账号是全站共享的，不会跟着被删掉）`)) return;
-      await api.adminDeleteUser(id);
-      await Promise.all([loadUsers(), loadOverview()]);
-      toast('已删除用户', 'ok');
+      if (!window.confirm(`删除「${user?.username ?? `游客#${id}`}」？\n名下 ${user?.roleCount ?? 0} 个游戏账号和它们的点赞记录都会一起删掉，不可恢复。`)) return;
+      const result = await api.adminDeleteUser(id);
+      await Promise.all([loadUsers(), loadRoles(), loadOverview()]);
+      toast(`已删除用户，连带 ${result.roleCount} 个游戏账号`, 'ok');
     }
   } catch (error) {
     toast(error.message, 'error', 5000);
@@ -420,7 +442,7 @@ dom.userTable.addEventListener('click', async (event) => {
 dom.roleTable.addEventListener('click', async (event) => {
   const button = event.target.closest('button');
   if (!button) return;
-  const { roleEdit, roleId, roleDelete } = button.dataset;
+  const { roleEdit, roleId, roleOwner, roleDelete } = button.dataset;
 
   try {
     if (roleEdit) {
@@ -481,11 +503,35 @@ dom.roleTable.addEventListener('click', async (event) => {
       return;
     }
 
+    if (roleOwner) {
+      const role = state.roles.find((item) => item.roleId === roleOwner);
+      if (!role) return;
+      openEdit(
+        '改归属',
+        [
+          {
+            name: 'userId',
+            label: '转给哪个用户',
+            type: 'select',
+            value: role.userId,
+            options: userOptions(),
+            hint: '旧数据导入后挂在 legacy-import 名下，这里可以转给真正的用户。',
+          },
+        ],
+        async (values) => {
+          await api.adminTransferRole(roleOwner, Number(values.userId));
+          await Promise.all([loadRoles(), loadUsers(), loadLogs()]);
+          toast('归属已修改', 'ok');
+        },
+      );
+      return;
+    }
+
     if (roleDelete) {
       const role = state.roles.find((item) => item.roleId === roleDelete);
-      if (!window.confirm(`从数据库里删除 roleId ${roleDelete}？\n所有设备上都会消失，不可恢复。`)) return;
-      await api.adminDeleteRole(roleDelete);
-      await Promise.all([loadRoles(), loadOverview(), loadLogs()]);
+      if (!window.confirm(`删除 roleId ${roleDelete}？\n它的所有云端点赞记录会一起删掉，不可恢复。`)) return;
+      const result = await api.adminDeleteRole(roleDelete);
+      await Promise.all([loadRoles(), loadUsers(), loadOverview(), loadLogs()]);
       toast('已删除', 'ok');
       void role;
     }
